@@ -655,7 +655,7 @@ COOMatrix COOSliceRows(COOMatrix coo, int64_t start, int64_t end) {
 
 COOMatrix COOSliceRows(COOMatrix coo, NDArray rows) {
   COOMatrix ret;
-  ATEN_COO_SWITCH(coo, XPU, IdType, "COOSliceRows", {
+  ATEN_COO_SWITCH_CUDA(coo, XPU, IdType, "COOSliceRows", {
     ret = impl::COOSliceRows<XPU, IdType>(coo, rows);
   });
   return ret;

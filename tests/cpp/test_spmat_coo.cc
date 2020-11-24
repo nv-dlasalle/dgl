@@ -349,3 +349,78 @@ TEST(SpmatTest, COOGetDataAndIndices) {
   _TestCOOGetDataAndIndices<int32_t>();
   _TestCOOGetDataAndIndices<int64_t>();
 }
+
+template <typename IDX>
+void _TestCOOSliceRows(DLContext ctx) {
+  auto coo = COO2<IDX>(ctx);
+  auto r = aten::VecToIdArray(std::vector<IDX>({0, 1, 3}), sizeof(IDX)*8, ctx);
+  auto x = aten::COOSliceRows(coo, r);
+  // [[0, 1, 2, 0, 0],
+  //  [1, 0, 0, 0, 0],
+  //  [0, 0, 0, 0, 0]]
+  // data: [0, 2, 5, 3]
+  auto tr = aten::VecToIdArray(std::vector<IDX>({0, 0, 1, 0}), sizeof(IDX)*8, ctx);
+  auto tc = aten::VecToIdArray(std::vector<IDX>({1, 2, 0, 2}), sizeof(IDX)*8, ctx);
+  ASSERT_TRUE(ArrayEQ<IDX>(x.row, tr)) << "x.row = " << x.row << ", tr = " << tr;
+  ASSERT_TRUE(ArrayEQ<IDX>(x.col, tc));
+}
+
+template <typename IDX>
+void _TestCOOSliceRowsLarge(DLContext ctx) {
+  const int64_t num_rows = 4000;
+  const int64_t num_cols = 1500;
+  const int64_t num_nonzeros = 10000;
+
+  std::vector<IDX> vrows;
+  vrows.reserve(num_nonzeros);
+  std::vector<IDX> vcols;
+  vcols.reserve(num_nonzeros);
+
+  // always use same seed to be repeatable
+  std::srand(0);
+  int64_t num_even_nz = 0;
+  int64_t num_odd_nz = 0;
+  for (int64_t i = 0; i < num_nonzeros; ++i) {
+    const int64_t row = std::rand()%num_rows;
+    vrows.emplace_back(row);
+    vcols.emplace_back(std::rand()%num_cols);
+
+    if (row % 2) {
+      // odd
+      ++num_odd_nz;
+    } else {
+      ++num_even_nz;
+    }
+  }
+  auto coo = aten::COOMatrix(num_rows, num_cols,
+      aten::VecToIdArray(vrows, sizeof(IDX)*8, ctx),
+      aten::VecToIdArray(vcols, sizeof(IDX)*8, ctx));
+
+  std::vector<IDX> even_rows;
+  even_rows.reserve(num_rows/2);
+  for (int64_t i = 0; i < num_rows; i+=2) {
+    even_rows.emplace_back(i);
+  }
+  std::vector<IDX> odd_rows;
+  odd_rows.reserve(num_rows/2);
+  for (int64_t i = 1; i < num_rows; i+=2) {
+    odd_rows.emplace_back(i);
+  }
+
+  auto r = aten::VecToIdArray(even_rows, sizeof(IDX)*8, ctx);
+  auto x = aten::COOSliceRows(coo, r);
+  ASSERT_TRUE(x.row->shape[0] == num_even_nz);
+
+  r = aten::VecToIdArray(odd_rows, sizeof(IDX)*8, ctx);
+  x = aten::COOSliceRows(coo, r);
+  ASSERT_TRUE(x.row->shape[0] == num_odd_nz);
+}
+
+TEST(SpmatTest, TestCOOSliceRows) {
+#ifdef DGL_USE_CUDA
+  _TestCOOSliceRows<int32_t>(GPU);
+  _TestCOOSliceRows<int64_t>(GPU);
+  _TestCOOSliceRowsLarge<int32_t>(GPU);
+  _TestCOOSliceRowsLarge<int64_t>(GPU);
+#endif
+}
