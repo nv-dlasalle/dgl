@@ -6,11 +6,12 @@
 
 #include <dgl/array.h>
 #include <dgl/runtime/device_api.h>
+
 #include <vector>
 #include <unordered_set>
 #include <numeric>
 #include <cstdint>
-#include <cub/cub.cuh>
+#include "cub/cub.cuh"
 #include "../../runtime/cuda/cuda_common.h"
 #include "./utils.h"
 
@@ -25,8 +26,7 @@ namespace aten {
 namespace impl {
 
 
-namespace
-{
+namespace {
 
 template<typename IdType>
 struct EmptyKey {
@@ -143,11 +143,10 @@ inline __device__ bool hashmap_has(
 
 template<typename IdType, int BLOCK_SIZE>
 __global__ void populate_hashmap(
-  const IdType * rows,
-  const int64_t num_rows,
-  IdType * const hashmap,
-  const size_t hashmap_size)
-{
+    const IdType * rows,
+    const int64_t num_rows,
+    IdType * const hashmap,
+    const size_t hashmap_size) {
   int64_t row = threadIdx.x + blockIdx.x*BLOCK_SIZE;
   if (row < num_rows) {
     insert_hashmap(rows[row], hashmap, hashmap_size);
@@ -156,12 +155,11 @@ __global__ void populate_hashmap(
 
 template<typename IdType, int BLOCK_SIZE>
 __global__ void count_edges(
-  const IdType * const hashmap,
-  const size_t hashmap_size,
-  const IdType * const dsts,
-  const int64_t num_edges,
-  int64_t * const num_dsts_per_block)
-{
+    const IdType * const hashmap,
+    const size_t hashmap_size,
+    const IdType * const dsts,
+    const int64_t num_edges,
+    int64_t * const num_dsts_per_block) {
   typedef cub::BlockReduce<uint16_t, BLOCK_SIZE> BlockReduce;
 
   __shared__ typename BlockReduce::TempStorage temp_storage;
@@ -185,17 +183,16 @@ __global__ void count_edges(
 
 template<typename IdType, int BLOCK_SIZE>
 __global__ void collect_edges(
-  const IdType * const hashmap,
-  const size_t hashmap_size,
-  const IdType * const dsts,
-  const IdType * const srcs,
-  const IdType * const data,
-  const int64_t num_edges,
-  const int64_t * const prefix_dsts_per_block,
-  IdType * const rows_out,
-  IdType * const cols_out,
-  IdType * const data_out)
-{
+    const IdType * const hashmap,
+    const size_t hashmap_size,
+    const IdType * const dsts,
+    const IdType * const srcs,
+    const IdType * const data,
+    const int64_t num_edges,
+    const int64_t * const prefix_dsts_per_block,
+    IdType * const rows_out,
+    IdType * const cols_out,
+    IdType * const data_out) {
   using BlockScan = typename cub::BlockScan<uint16_t, BLOCK_SIZE>;
 
   __shared__ typename BlockScan::TempStorage temp_storage;
@@ -235,7 +232,7 @@ COOMatrix COOSliceRows(COOMatrix coo, NDArray rows) {
   constexpr const int BLOCK_SIZE = 128;
 
   DGLContext ctx = coo.row->ctx;
-  auto device = DeviceAPI::Get(ctx); 
+  auto device = DeviceAPI::Get(ctx);
 
   // use default stream for now
   cudaStream_t stream = 0;
@@ -251,15 +248,18 @@ COOMatrix COOSliceRows(COOMatrix coo, NDArray rows) {
 
   // First we need create a hash map of rows we will keep, so for a given
   // edge we can check if it is gathered by this slice
-  IdType * hash_table = static_cast<IdType*>(device->AllocWorkspace(ctx, hash_size*sizeof(IdType)));
-  CUDA_CALL(cudaMemsetAsync(hash_table, EmptyKey<IdType>::value, hash_size*sizeof(IdType), stream)); 
+  IdType * hash_table = static_cast<IdType*>(device->AllocWorkspace(ctx,
+      hash_size*sizeof(IdType)));
+  CUDA_CALL(cudaMemsetAsync(hash_table, EmptyKey<IdType>::value,
+      hash_size*sizeof(IdType), stream));
   populate_hashmap<IdType, BLOCK_SIZE><<<row_grid_size, BLOCK_SIZE, 0, stream>>>(
       rows.Ptr<IdType>(), rows->shape[0], hash_table, hash_size);
   CUDA_CALL(cudaGetLastError());
 
   // Next we need to count the number of non-zeros that will be kept per
   // threadblock
-  int64_t * block_prefix = static_cast<int64_t*>(device->AllocWorkspace(ctx, (edge_grid_size+1)*sizeof(int64_t)));
+  int64_t * block_prefix = static_cast<int64_t*>(
+      device->AllocWorkspace(ctx, (edge_grid_size+1)*sizeof(int64_t)));
   count_edges<IdType, BLOCK_SIZE><<<
       edge_grid_size, BLOCK_SIZE, 0, stream>>>(
       hash_table, hash_size, coo.row.Ptr<IdType>(), coo.row->shape[0],
@@ -275,7 +275,7 @@ COOMatrix COOSliceRows(COOMatrix coo, NDArray rows) {
       block_prefix,
       block_prefix,
       edge_grid_size+1));
-  
+
   void * prefix_sum_space = device->AllocWorkspace(ctx, prefix_sum_bytes);
 
   CUDA_CALL(cub::DeviceScan::ExclusiveSum(
@@ -292,11 +292,12 @@ COOMatrix COOSliceRows(COOMatrix coo, NDArray rows) {
       &nnz, block_prefix+edge_grid_size, sizeof(nnz), cudaMemcpyDeviceToHost,
       stream));
   device->StreamSync(ctx, stream);
-  
+
   // allocate output space
   IdArray ret_row = NDArray::Empty({nnz}, coo.row->dtype, ctx);
   IdArray ret_col = NDArray::Empty({nnz}, coo.row->dtype, ctx);
-  IdArray ret_data = IsNullArray(coo.data) ? NullArray() : NDArray::Empty({nnz}, coo.row->dtype, ctx);
+  IdArray ret_data = IsNullArray(coo.data) ? NullArray() :
+      NDArray::Empty({nnz}, coo.row->dtype, ctx);
 
   // Finally insert the rows associated with the edges
   collect_edges<IdType, BLOCK_SIZE><<<
