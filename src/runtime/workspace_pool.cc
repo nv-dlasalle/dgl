@@ -38,12 +38,12 @@ class WorkspacePool::Pool {
       free_list_.pop_back();
       if (e.size < nbytes) {
         // resize the page
-        device->FreeDataSpace(ctx, e.data);
-        e.data = device->AllocDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
+        device->FreeRawDataSpace(ctx, e.data);
+        e.data = device->AllocRawDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
         e.size = nbytes;
       }
     } else if (free_list_.size() == 1) {
-      e.data = device->AllocDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
+      e.data = device->AllocRawDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
       e.size = nbytes;
     } else {
       if (free_list_.back().size >= nbytes) {
@@ -56,8 +56,8 @@ class WorkspacePool::Pool {
         // resize the page
         e = free_list_.back();
         free_list_.pop_back();
-        device->FreeDataSpace(ctx, e.data);
-        e.data = device->AllocDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
+        device->FreeRawDataSpace(ctx, e.data);
+        e.data = device->AllocRawDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
         e.size = nbytes;
       }
     }
@@ -96,7 +96,7 @@ class WorkspacePool::Pool {
   void Release(DGLContext ctx, DeviceAPI* device) {
     CHECK_EQ(allocated_.size(), 1);
     for (size_t i = 1; i < free_list_.size(); ++i) {
-      device->FreeDataSpace(ctx, free_list_[i].data);
+      device->FreeRawDataSpace(ctx, free_list_[i].data);
     }
     free_list_.clear();
   }

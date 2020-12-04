@@ -4,17 +4,42 @@
  * \brief GPU specific API
  */
 #include <dgl/runtime/device_api.h>
-
 #include <dmlc/thread_local.h>
 #include <dgl/runtime/registry.h>
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <string>
 #include "cuda_common.h"
+#include "cuda_memory_pool.h"
 
 namespace dgl {
 namespace runtime {
 
+namespace {
+constexpr const char * const kUseMemoryPoolString = "DGL_USE_CUDA_MEMORY_POOL";
+}
+
+CudaMemoryPool& GetGlobalCudaMemoryPool();
+
 class CUDADeviceAPI final : public DeviceAPI {
  public:
+  CUDADeviceAPI() : use_memory_pool_(false) {
+    char * const use_str = std::getenv(kUseMemoryPoolString);
+
+    if (use_str) {
+      std::string value(use_str);
+      std::transform(value.begin(), value.end(), value.begin(),
+          [](char c) {return static_cast<char>(std::tolower(c)); });
+      if (value == "true" || value == "1") {
+        use_memory_pool_ = true;
+      } else if (value == "false" || value == "0") {
+        use_memory_pool_ = false;
+      } else {
+        LOG(WARNING) << "Unknown value for " << kUseMemoryPoolString
+            << " '" << use_str << "', ignoring." << std::endl;
+      }
+    }
+  }
   void SetDevice(DGLContext ctx) final {
     CUDA_CALL(cudaSetDevice(ctx.device_id));
   }
@@ -86,7 +111,29 @@ class CUDADeviceAPI final : public DeviceAPI {
     }
     *rv = value;
   }
+
   void* AllocDataSpace(DGLContext ctx,
+                       size_t nbytes,
+                       size_t alignment,
+                       DGLType type_hint) final {
+    void * ret;
+    if (use_memory_pool_) {
+      ret = GetGlobalCudaMemoryPool().Alloc(ctx, nbytes);
+    } else {
+      ret = AllocRawDataSpace(ctx, nbytes, alignment, type_hint);
+    }
+    return ret;
+  }
+
+  void FreeDataSpace(DGLContext ctx, void* ptr) final {
+    if (use_memory_pool_) {
+      GetGlobalCudaMemoryPool().Free(ctx, ptr);
+    } else {
+      FreeRawDataSpace(ctx, ptr);
+    }
+  }
+
+  void* AllocRawDataSpace(DGLContext ctx,
                        size_t nbytes,
                        size_t alignment,
                        DGLType type_hint) final {
@@ -98,7 +145,7 @@ class CUDADeviceAPI final : public DeviceAPI {
     return ret;
   }
 
-  void FreeDataSpace(DGLContext ctx, void* ptr) final {
+  void FreeRawDataSpace(DGLContext ctx, void* ptr) final {
     CUDA_CALL(cudaSetDevice(ctx.device_id));
     CUDA_CALL(cudaFree(ptr));
   }
@@ -185,6 +232,8 @@ class CUDADeviceAPI final : public DeviceAPI {
   }
 
  private:
+  bool use_memory_pool_;
+
   static void GPUCopy(const void* from,
                       void* to,
                       size_t size,
@@ -197,6 +246,11 @@ class CUDADeviceAPI final : public DeviceAPI {
     }
   }
 };
+
+CudaMemoryPool& GetGlobalCudaMemoryPool() {
+  static CudaMemoryPool pool(CUDADeviceAPI::Global());
+  return pool;
+}
 
 typedef dmlc::ThreadLocalStore<CUDAThreadEntry> CUDAThreadStore;
 
