@@ -18,7 +18,9 @@ import tqdm
 import traceback
 
 from utils import thread_wrapped_func
-from load_graph import load_reddit, inductive_split
+from load_graph import load_ogb, load_reddit, inductive_split
+
+
 
 class SAGE(nn.Module):
     def __init__(self,
@@ -274,6 +276,7 @@ if __name__ == '__main__':
     argparser.add_argument('--log-every', type=int, default=20)
     argparser.add_argument('--eval-every', type=int, default=5)
     argparser.add_argument('--lr', type=float, default=0.003)
+    argparser.add_argument('--dataset', type=str, default='ogbn-products')
     argparser.add_argument('--dropout', type=float, default=0.5)
     argparser.add_argument('--num-workers', type=int, default=0,
         help="Number of sampling processes. Use 0 for no extra process.")
@@ -284,7 +287,11 @@ if __name__ == '__main__':
     devices = list(map(int, args.gpu.split(',')))
     n_gpus = len(devices)
 
-    g, n_classes = load_reddit()
+    if dataset == 'reddit':
+        g, n_classes = load_reddit()
+    else:
+        g, n_classes = load_ogb(dataset)
+
     # Construct graph
     g = dgl.as_heterograph(g)
     in_feats = g.ndata['features'].shape[1]
