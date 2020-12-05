@@ -26,15 +26,32 @@ class PrefetchingIterator:
         self.iter_ = i
         self.dev_id_ = dev_id
         self.g_ = g
+        self.async_ = AsyncTransferer(dev_id)
         self.fetched_ = None
 
     def __next__(self):
         nvtx.range_push("prefetch")
-        input_nodes, seeds, blocks = next(self.iter_)
+        if self._fetched is None:
+            # directly load everything
+            input_nodes, seeds, blocks = next(self.iter_)
+            inputs, labels = load_subtensor(self.g_, self.g_.ndata['labels'],
+                    seeds, input_nodes, self.dev_id_)
+        else:
+            # grap futures
+            inputs_future, labels_future, blocks = self._fetched
 
-        inputs, labels = load_subtensor(self.g_, self.g_.ndata['labels'],
-                seeds, input_nodes, self.dev_id_)
+            # initiate next fetch
+            input_nodes, seeds, next_blocks = next(self.iter_)
+            next_inputs, next_labels = load_subtensor_prefetch(
+                self.g_, self.g_.ndata['labels'], seeds,
+                input_nodes,  self.dev_id_, self.async_)
+            self.fetched_ = (next_inputs, next_labels, next_blocks)
+
+            inputs = inputs_future.wait()
+            labels = labels_future.wait()
+
         blocks = [block.int().to(self.dev_id_) for block in blocks]
+
         nvtx.range_pop()
         
         return (blocks, inputs, labels)
