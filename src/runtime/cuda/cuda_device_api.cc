@@ -239,7 +239,7 @@ class CUDADeviceAPI final : public DeviceAPI {
                       size_t size,
                       cudaMemcpyKind kind,
                       cudaStream_t stream) {
-    if (stream != 0) {
+    if (stream != 0 || kind != cudaMemcpyDeviceToHost) {
       CUDA_CALL(cudaMemcpyAsync(to, from, size, kind, stream));
     } else {
       CUDA_CALL(cudaMemcpy(to, from, size, kind));

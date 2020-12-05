@@ -119,10 +119,15 @@ def load_subtensor(g, labels, seeds, input_nodes, dev_id):
     Copys features and labels of a set of nodes onto GPU.
     """
     nvtx.range_push("batch_inputs_to_gpu")
-    batch_inputs = g.ndata['features'][input_nodes].to(dev_id)
+    if dev_id != 'cpu':
+        batch_inputs_cpu = th.empty((input_nodes.shape[0], g.ndata['features'].shape[1]), pin_memory=True)
+        th.index_select(g.ndata['features'],0, input_nodes, out=batch_inputs_cpu)
+        batch_inputs = batch_inputs_cpu.to(dev_id, non_blocking=True)
+    else:
+        batch_inputs = g.ndata['features'][input_nodes].to(dev_id)
     nvtx.range_pop()
     nvtx.range_push("batch_labels_to_gpu")
-    batch_labels = labels[seeds].to(dev_id)
+    batch_labels = labels[seeds].to(dev_id, non_blocking=True)
     nvtx.range_pop()
     return batch_inputs, batch_labels
 
@@ -139,7 +144,8 @@ def run(proc_id, n_gpus, args, devices, data):
                                           init_method=dist_init_method,
                                           world_size=world_size,
                                           rank=proc_id)
-    th.cuda.set_device(dev_id)
+    if dev_id != 'cpu':
+        th.cuda.set_device(dev_id)
 
     # Unpack data
     in_feats, n_classes, train_g, val_g, test_g = data
@@ -297,6 +303,8 @@ if __name__ == '__main__':
     data = in_feats, n_classes, train_g, val_g, test_g
 
     if n_gpus == 1:
+        if devices[0] < 0:
+            devices[0] = 'cpu'
         run(0, n_gpus, args, devices, data)
     else:
         procs = []
