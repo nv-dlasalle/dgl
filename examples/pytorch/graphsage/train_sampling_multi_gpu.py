@@ -21,6 +21,40 @@ from utils import thread_wrapped_func
 from load_graph import load_ogb, load_reddit, inductive_split
 
 
+class PrefetchingIterator:
+    def __init__(self, i, dev_id, g):
+        self.iter_ = i
+        self.dev_id_ = dev_id
+        self.g_ = g
+        self.fetched_ = None
+
+    def __next__(self):
+        nvtx.range_push("prefetch")
+        input_nodes, seeds, blocks = next(self.iter_)
+
+        inputs, labels = load_subtensor(self.g_, self.g_.ndata['labels'],
+                seeds, input_nodes, self.dev_id_)
+        blocks = [block.int().to(self.dev_id_) for block in blocks]
+        nvtx.range_pop()
+        
+        return (blocks, inputs, labels)
+        
+
+class PrefetchingNodeDataLoader:
+    def __init__(self, dev_id, g, nids, block_sampler, **kwargs):
+        self.dev_id_ = dev_id
+        self.g_ = g
+        self.dataloader_ = dgl.dataloading.NodeDataLoader(g, nids, block_sampler, **kwargs)
+
+    def __iter__(self):
+        """Return the iterator of the data loader."""
+        return PrefetchingIterator(self.dataloader_.__iter__(), self.dev_id_,
+            self.g_)
+
+    def __len__(self):
+        """Return the number of batches of the data loader."""
+        return len(self.dataloader_)
+
 
 class SAGE(nn.Module):
     def __init__(self,
@@ -133,6 +167,24 @@ def load_subtensor(g, labels, seeds, input_nodes, dev_id):
     nvtx.range_pop()
     return batch_inputs, batch_labels
 
+
+def load_subtensor_future(g, labels, seeds, input_nodes, dev_id):
+    """
+    Copys features and labels of a set of nodes onto GPU.
+    """
+    nvtx.range_push("batch_inputs_to_gpu")
+    if dev_id != 'cpu':
+        batch_inputs_cpu = th.empty((input_nodes.shape[0], g.ndata['features'].shape[1]), pin_memory=True)
+        th.index_select(g.ndata['features'],0, input_nodes, out=batch_inputs_cpu)
+        batch_inputs = batch_inputs_cpu.to(dev_id, non_blocking=True)
+    else:
+        batch_inputs = g.ndata['features'][input_nodes].to(dev_id)
+    nvtx.range_pop()
+    nvtx.range_push("batch_labels_to_gpu")
+    batch_labels = labels[seeds].to(dev_id, non_blocking=True)
+    nvtx.range_pop()
+    return batch_inputs, batch_labels
+
 #### Entry point
 
 def run(proc_id, n_gpus, args, devices, data):
@@ -164,7 +216,8 @@ def run(proc_id, n_gpus, args, devices, data):
     # Create PyTorch DataLoader for constructing blocks
     sampler = dgl.dataloading.MultiLayerNeighborSampler(
         [int(fanout) for fanout in args.fan_out.split(',')])
-    dataloader = dgl.dataloading.NodeDataLoader(
+    dataloader = PrefetchingNodeDataLoader(
+        dev_id,
         train_g,
         train_nid,
         sampler,
@@ -190,18 +243,9 @@ def run(proc_id, n_gpus, args, devices, data):
 
         # Loop over the dataloader to sample the computation dependency graph as a list of
         # blocks.
-        for step, (input_nodes, seeds, blocks) in enumerate(dataloader):
+        for step, (blocks, batch_inputs, batch_labels) in enumerate(dataloader):
             if proc_id == 0:
                 tic_step = time.time()
-
-            # Load the input features as well as output labels
-            nvtx.range_push("load_subtensor()")
-            batch_inputs, batch_labels = load_subtensor(train_g, train_g.ndata['labels'], seeds, input_nodes, dev_id)
-            nvtx.range_pop()
-
-            nvtx.range_push("blocks_to_gpu")
-            blocks = [block.int().to(dev_id) for block in blocks]
-            nvtx.range_pop()
 
             # Compute loss and prediction
             nvtx.range_push("model.forward")
@@ -226,7 +270,7 @@ def run(proc_id, n_gpus, args, devices, data):
 
             nvtx.range_push("reporting.iter_tput")
             if proc_id == 0:
-                iter_tput.append(len(seeds) * n_gpus / (time.time() - tic_step))
+                iter_tput.append(batch_labels.shape[0] * n_gpus / (time.time() - tic_step))
             nvtx.range_pop()
 
             nvtx.range_push("reporting.step")
@@ -287,10 +331,10 @@ if __name__ == '__main__':
     devices = list(map(int, args.gpu.split(',')))
     n_gpus = len(devices)
 
-    if dataset == 'reddit':
+    if args.dataset == 'reddit':
         g, n_classes = load_reddit()
     else:
-        g, n_classes = load_ogb(dataset)
+        g, n_classes = load_ogb(args.dataset)
 
     # Construct graph
     g = dgl.as_heterograph(g)
