@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.multiprocessing as mp
+from torch.cuda import nvtx
 from torch.utils.data import DataLoader
 import dgl.function as fn
 import dgl.nn.pytorch as dglnn
@@ -117,8 +118,12 @@ def load_subtensor(g, labels, seeds, input_nodes, dev_id):
     """
     Copys features and labels of a set of nodes onto GPU.
     """
+    nvtx.range_push("batch_inputs_to_gpu")
     batch_inputs = g.ndata['features'][input_nodes].to(dev_id)
+    nvtx.range_pop()
+    nvtx.range_push("batch_labels_to_gpu")
     batch_labels = labels[seeds].to(dev_id)
+    nvtx.range_pop()
     return batch_inputs, batch_labels
 
 #### Entry point
@@ -182,21 +187,46 @@ def run(proc_id, n_gpus, args, devices, data):
                 tic_step = time.time()
 
             # Load the input features as well as output labels
+            nvtx.range_push("load_subtensor()")
             batch_inputs, batch_labels = load_subtensor(train_g, train_g.ndata['labels'], seeds, input_nodes, dev_id)
-            blocks = [block.int().to(dev_id) for block in blocks]
-            # Compute loss and prediction
-            batch_pred = model(blocks, batch_inputs)
-            loss = loss_fcn(batch_pred, batch_labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            nvtx.range_pop()
 
+            nvtx.range_push("blocks_to_gpu")
+            blocks = [block.int().to(dev_id) for block in blocks]
+            nvtx.range_pop()
+
+            # Compute loss and prediction
+            nvtx.range_push("model.forward")
+            batch_pred = model(blocks, batch_inputs)
+            nvtx.range_pop()
+
+            nvtx.range_push("loss_fcn")
+            loss = loss_fcn(batch_pred, batch_labels)
+            nvtx.range_pop()
+
+            nvtx.range_push("optimizer.zero_grad")
+            optimizer.zero_grad()
+            nvtx.range_pop()
+
+            nvtx.range_push("loss.backward")
+            loss.backward()
+            nvtx.range_pop()
+
+            nvtx.range_push("optimizer.step")
+            optimizer.step()
+            nvtx.range_pop()
+
+            nvtx.range_push("reporting.iter_tput")
             if proc_id == 0:
                 iter_tput.append(len(seeds) * n_gpus / (time.time() - tic_step))
+            nvtx.range_pop()
+
+            nvtx.range_push("reporting.step")
             if step % args.log_every == 0 and proc_id == 0:
                 acc = compute_acc(batch_pred, batch_labels)
                 print('Epoch {:05d} | Step {:05d} | Loss {:.4f} | Train Acc {:.4f} | Speed (samples/sec) {:.4f} | GPU {:.1f} MB'.format(
                     epoch, step, loss.item(), acc.item(), np.mean(iter_tput[3:]), th.cuda.max_memory_allocated() / 1000000))
+            nvtx.range_pop()
 
         if n_gpus > 1:
             th.distributed.barrier()
