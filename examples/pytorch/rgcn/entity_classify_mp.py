@@ -15,6 +15,7 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.multiprocessing as mp
+from torch.cuda import nvtx
 from torch.multiprocessing import Queue
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
@@ -105,9 +106,13 @@ class EntityClassify(nn.Module):
             # full graph training
             blocks = [self.g] * len(self.layers)
         h = feats
+        i = 0
         for layer, block in zip(self.layers, blocks):
+            nvtx.range_push("forward.layer_{}".format(i))
             block = block.to(self.device)
             h = layer(block, h, block.edata['etype'], block.edata['norm'])
+            nvtx.range_pop()
+            i+=1
         return h
 
 class NeighborSampler:
@@ -285,10 +290,11 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             else:
                 dense_params += list(embed_layer.embeds.parameters())
         optimizer = th.optim.Adam(dense_params, lr=args.lr, weight_decay=args.l2norm)
-        if  n_gpus > 1:
-            emb_optimizer = th.optim.SparseAdam(embed_layer.module.node_embeds.parameters(), lr=args.lr)
-        else:
-            emb_optimizer = th.optim.SparseAdam(embed_layer.node_embeds.parameters(), lr=args.lr)
+        if embed_layer.node_embeds:
+            if  n_gpus > 1:
+                emb_optimizer = th.optim.SparseAdam(list(embed_layer.module.node_embeds.parameters()), lr=args.lr)
+            else:
+                emb_optimizer = th.optim.SparseAdam(list(embed_layer.node_embeds.parameters()), lr=args.lr)
     else:
         all_params = list(model.parameters()) + list(embed_layer.parameters())
         optimizer = th.optim.Adam(all_params, lr=args.lr, weight_decay=args.l2norm)
@@ -302,82 +308,78 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         model.train()
         embed_layer.train()
 
+        tic = time.time()
         for i, sample_data in enumerate(loader):
             seeds, blocks = sample_data
             t0 = time.time()
+
+            nvtx.range_push("features_to_gpu")
+            features_gpu = [None for i in range(num_of_ntype)]
+            loc_cpu = [None for i in range(num_of_ntype)]
+            for ntype in range(num_of_ntype):
+                if node_feats[ntype] is not None:
+                    loc_cpu[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
+                    features_cpu = th.empty((loc_cpu[ntype].shape[0], node_feats[ntype].shape[1]), pin_memory=True)
+                    th.index_select(node_feats[ntype], 0, loc_cpu[ntype], out=features_cpu)
+                    features_gpu[ntype] = features_cpu.to(devices[proc_id], non_blocking=True)
+    
+            # generate remaining locs while gpu transfer takes place
+            for ntype in range(num_of_ntype):
+                if loc_cpu[ntype] is None:
+                    loc_cpu[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
+            nvtx.range_pop()
+                    
+
+            nvtx.range_push("embed_layer")
             feats = embed_layer(blocks[0].srcdata[dgl.NID],
                                 blocks[0].srcdata[dgl.NTYPE],
                                 blocks[0].srcdata['type_id'],
-                                node_feats)
+                                features_gpu,
+                                loc_cpu)
+            nvtx.range_pop()
+            nvtx.range_push("forward")
             logits = model(blocks, feats)
+            nvtx.range_pop()
+            nvtx.range_push("F.cross_entropy")
             loss = F.cross_entropy(logits, labels[seeds])
+            nvtx.range_pop()
             t1 = time.time()
+            nvtx.range_push("zero_grad")
             optimizer.zero_grad()
             if args.sparse_embedding:
                 emb_optimizer.zero_grad()
+            nvtx.range_pop()
 
+            nvtx.range_push("loss.backward")
             loss.backward()
+            nvtx.range_pop()
+            nvtx.range_push("optimizer.step")
             optimizer.step()
+            nvtx.range_pop()
+            nvtx.range_push("emb_optimizer.step")
             if args.sparse_embedding:
                 emb_optimizer.step()
+            nvtx.range_pop()
             t2 = time.time()
 
             forward_time.append(t1 - t0)
             backward_time.append(t2 - t1)
-            train_acc = th.sum(logits.argmax(dim=1) == labels[seeds]).item() / len(seeds)
-            if i % 100 and proc_id == 0:
-                print("Train Accuracy: {:.4f} | Train Loss: {:.4f}".
-                    format(train_acc, loss.item()))
-        print("Epoch {:05d}:{:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f}".
-            format(epoch, i, forward_time[-1], backward_time[-1]))
 
-        if (queue is not None) or (proc_id == 0):
-            val_logits, val_seeds = evaluate(model, embed_layer, val_loader, node_feats)
-            if queue is not None:
-                queue.put((val_logits, val_seeds))
+            if i % 20 == 0 and proc_id == 0:
+                train_acc = th.sum(logits.argmax(dim=1) == labels[seeds]).item() / len(seeds)
+                print("Step: {:05d}/{:05d}:{:05d} | Train Accuracy: {:.4f} | Train Loss: {:.4f}".
+                    format(i, len(loader), epoch, train_acc, loss.item()))
 
-            # gather evaluation result from multiple processes
-            if proc_id == 0:
-                if queue is not None:
-                    val_logits = []
-                    val_seeds = []
-                    for i in range(n_gpus):
-                        log = queue.get()
-                        val_l, val_s = log
-                        val_logits.append(val_l)
-                        val_seeds.append(val_s)
-                    val_logits = th.cat(val_logits)
-                    val_seeds = th.cat(val_seeds)
-                val_loss = F.cross_entropy(val_logits, labels[val_seeds].cpu()).item()
-                val_acc = th.sum(val_logits.argmax(dim=1) == labels[val_seeds].cpu()).item() / len(val_seeds)
+            # delete me
+            if i >= 100:
+                break
+        toc = time.time()
+        print("Epoch time: {:.05f}".format(toc-tic))
+        print("Epoch {:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f}".
+            format(epoch, forward_time[-1], backward_time[-1]))
 
-                print("Validation Accuracy: {:.4f} | Validation loss: {:.4f}".
-                        format(val_acc, val_loss))
         if n_gpus > 1:
             th.distributed.barrier()
-
-    # only process 0 will do the evaluation
-    if (queue is not None) or (proc_id == 0):
-        test_logits, test_seeds = evaluate(model, embed_layer, test_loader, node_feats)
-        if queue is not None:
-            queue.put((test_logits, test_seeds))
-
-        # gather evaluation result from multiple processes
-        if proc_id == 0:
-            if queue is not None:
-                test_logits = []
-                test_seeds = []
-                for i in range(n_gpus):
-                    log = queue.get()
-                    test_l, test_s = log
-                    test_logits.append(test_l)
-                    test_seeds.append(test_s)
-                test_logits = th.cat(test_logits)
-                test_seeds = th.cat(test_seeds)
-            test_loss = F.cross_entropy(test_logits, labels[test_seeds].cpu()).item()
-            test_acc = th.sum(test_logits.argmax(dim=1) == labels[test_seeds].cpu()).item() / len(test_seeds)
-            print("Test Accuracy: {:.4f} | Test loss: {:.4f}".format(test_acc, test_loss))
-            print()
 
     # sync for test
     if n_gpus > 1:
