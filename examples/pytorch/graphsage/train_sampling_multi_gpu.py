@@ -7,6 +7,7 @@ import torch.optim as optim
 import torch.multiprocessing as mp
 from torch.cuda import nvtx
 from torch.utils.data import DataLoader
+from dgl.dataloading import AsyncTransferer
 import dgl.function as fn
 import dgl.nn.pytorch as dglnn
 import time
@@ -31,26 +32,29 @@ class PrefetchingIterator:
 
     def __next__(self):
         nvtx.range_push("prefetch")
-        if self._fetched is None:
+
+        if self.fetched_ is None:
             # directly load everything
             input_nodes, seeds, blocks = next(self.iter_)
             inputs, labels = load_subtensor(self.g_, self.g_.ndata['labels'],
                     seeds, input_nodes, self.dev_id_)
-        else:
+            blocks = [block.int().to(self.dev_id_) for block in blocks]
+
+        # initiate next fetch
+        input_nodes, seeds, next_blocks = next(self.iter_)
+        next_blocks = [block.int().to(self.dev_id_) for block in next_blocks]
+        next_inputs, next_labels = load_subtensor_future(
+            self.g_, self.g_.ndata['labels'], seeds,
+            input_nodes,  self.dev_id_, self.async_)
+        next_fetch = (next_inputs, next_labels, next_blocks)
+
+        if self.fetched_:
             # grap futures
-            inputs_future, labels_future, blocks = self._fetched
-
-            # initiate next fetch
-            input_nodes, seeds, next_blocks = next(self.iter_)
-            next_inputs, next_labels = load_subtensor_prefetch(
-                self.g_, self.g_.ndata['labels'], seeds,
-                input_nodes,  self.dev_id_, self.async_)
-            self.fetched_ = (next_inputs, next_labels, next_blocks)
-
+            inputs_future, labels_future, blocks = self.fetched_
+            self.fetched_ = None
             inputs = inputs_future.wait()
-            labels = labels_future.wait()
-
-        blocks = [block.int().to(self.dev_id_) for block in blocks]
+            labels = labels_future
+        self.fetched_ = next_fetch
 
         nvtx.range_pop()
         
@@ -185,20 +189,18 @@ def load_subtensor(g, labels, seeds, input_nodes, dev_id):
     return batch_inputs, batch_labels
 
 
-def load_subtensor_future(g, labels, seeds, input_nodes, dev_id):
+def load_subtensor_future(g, labels, seeds, input_nodes, dev_id, transfer):
     """
     Copys features and labels of a set of nodes onto GPU.
     """
-    nvtx.range_push("batch_inputs_to_gpu")
-    if dev_id != 'cpu':
-        batch_inputs_cpu = th.empty((input_nodes.shape[0], g.ndata['features'].shape[1]), pin_memory=True)
-        th.index_select(g.ndata['features'],0, input_nodes, out=batch_inputs_cpu)
-        batch_inputs = batch_inputs_cpu.to(dev_id, non_blocking=True)
-    else:
-        batch_inputs = g.ndata['features'][input_nodes].to(dev_id)
-    nvtx.range_pop()
-    nvtx.range_push("batch_labels_to_gpu")
+    nvtx.range_push("batch_labels_to_gpu_async")
     batch_labels = labels[seeds].to(dev_id, non_blocking=True)
+    nvtx.range_pop()
+
+    nvtx.range_push("batch_inputs_to_gpu_async")
+    batch_inputs_cpu = th.empty((input_nodes.shape[0], g.ndata['features'].shape[1]), pin_memory=True)
+    th.index_select(g.ndata['features'],0, input_nodes, out=batch_inputs_cpu)
+    batch_inputs = transfer.async_copy(batch_inputs_cpu, dev_id)
     nvtx.range_pop()
     return batch_inputs, batch_labels
 
@@ -264,6 +266,8 @@ def run(proc_id, n_gpus, args, devices, data):
             if proc_id == 0:
                 tic_step = time.time()
 
+            count = batch_labels.shape[0]
+
             # Compute loss and prediction
             nvtx.range_push("model.forward")
             batch_pred = model(blocks, batch_inputs)
@@ -285,9 +289,11 @@ def run(proc_id, n_gpus, args, devices, data):
             optimizer.step()
             nvtx.range_pop()
 
+            batch_inputs = None
+
             nvtx.range_push("reporting.iter_tput")
             if proc_id == 0:
-                iter_tput.append(batch_labels.shape[0] * n_gpus / (time.time() - tic_step))
+                iter_tput.append(count * n_gpus / (time.time() - tic_step))
             nvtx.range_pop()
 
             nvtx.range_push("reporting.step")

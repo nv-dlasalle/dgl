@@ -65,10 +65,18 @@ TransferId AsyncTransferer::StartTransfer(
 
   DLDataType dtype = src->dtype;
   std::vector<int64_t> shape(src->shape, src->shape+src->ndim);
-  t.dst = NDArray::EmptyRaw(shape, dtype, dst_ctx);
+
+  t.dst = NDArray::Empty(shape, dtype, dst_ctx);
 
   if (stream_) {
     #ifdef DGL_USE_CUDA
+    // make our copy wait to sync with the default stream
+    cudaEvent_t alloc_event;
+    CUDA_CALL(cudaEventCreate(&alloc_event));
+    CUDA_CALL(cudaEventRecord(alloc_event, 0));
+    CUDA_CALL(cudaStreamWaitEvent(static_cast<cudaStream_t>(stream_), alloc_event));
+    CUDA_CALL(cudaEventDestroy(alloc_event));
+
     // get tensor information
     t.event.reset(new Event);
     CUDA_CALL(cudaEventCreate(&t.event->id));
