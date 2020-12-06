@@ -40,21 +40,22 @@ class PrefetchingIterator:
                     seeds, input_nodes, self.dev_id_)
             blocks = [block.int().to(self.dev_id_) for block in blocks]
 
-        # initiate next fetch
-        input_nodes, seeds, next_blocks = next(self.iter_)
-        next_blocks = [block.int().to(self.dev_id_) for block in next_blocks]
-        next_inputs, next_labels = load_subtensor_future(
-            self.g_, self.g_.ndata['labels'], seeds,
-            input_nodes,  self.dev_id_, self.async_)
-        next_fetch = (next_inputs, next_labels, next_blocks)
+        if self.dev_id_ != 'cpu':
+            # initiate next fetch
+            input_nodes, seeds, next_blocks = next(self.iter_)
+            next_blocks = [block.int().to(self.dev_id_) for block in next_blocks]
+            next_inputs, next_labels = load_subtensor_future(
+                self.g_, self.g_.ndata['labels'], seeds,
+                input_nodes,  self.dev_id_, self.async_)
+            next_fetch = (next_inputs, next_labels, next_blocks)
 
-        if self.fetched_:
-            # grap futures
-            inputs_future, labels_future, blocks = self.fetched_
-            self.fetched_ = None
-            inputs = inputs_future.wait()
-            labels = labels_future
-        self.fetched_ = next_fetch
+            if self.fetched_:
+                # grap futures
+                inputs_future, labels_future, blocks = self.fetched_
+                self.fetched_ = None
+                inputs = inputs_future.wait()
+                labels = labels_future
+            self.fetched_ = next_fetch
 
         nvtx.range_pop()
         
