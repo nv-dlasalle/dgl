@@ -316,7 +316,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             seeds, blocks = sample_data
             t0 = time.time()
 
-            blocks_gpu = [block.to(dev_id, non_blocking=True) for block in blocks]
+            blocks_gpu = [block.to(devices[proc_id], non_blocking=True) for block in blocks]
 
             loc_cpu = [None for i in range(num_of_ntype)]
             for ntype in range(num_of_ntype):
@@ -343,7 +343,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             tmp_feats = feat_layer(features_gpu)
             for ntype in range(num_of_ntype):
                 if node_feats[ntype] is not None:
-                    loc_gpu = loc_cpu[ntype].to(dev_id, non_blocking=True)
+                    loc_gpu = loc_cpu[ntype].to(devices[proc_id], non_blocking=True)
                     feats[loc_gpu] = tmp_feats[ntype]
 
             nvtx.range_push("forward")
@@ -361,11 +361,10 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                 emb_optimizer.zero_grad()
             nvtx.range_pop()
 
-            print("backward")
             nvtx.range_push("loss.backward")
             loss.backward()
             nvtx.range_pop()
-            print("backward_finished")
+
             nvtx.range_push("optimizer.step")
             optimizer.step()
             nvtx.range_pop()

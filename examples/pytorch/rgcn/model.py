@@ -144,7 +144,7 @@ class RelGraphEmbedLayer(nn.Module):
             embeddings as the input of the next layer
         """
         nvtx.range_push("node_ids_to_gpu")
-        tsd_ids = node_ids
+        tsd_ids = node_ids.to(self.node_embeds.weight.device, non_blocking=True)
         nvtx.range_pop()
         nvtx.range_push("alloc_empty_embds")
         embeds = th.empty(node_ids.shape[0], self.embed_size, device=self.dev_id)
