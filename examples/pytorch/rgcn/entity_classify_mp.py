@@ -25,6 +25,7 @@ from functools import partial
 
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
 from model import RelGraphEmbedLayer
+from sparse_optimizer import FastSparseAdam
 from dgl.nn import RelGraphConv
 from utils import thread_wrapped_func
 import tqdm 
@@ -294,7 +295,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             if  n_gpus > 1:
                 emb_optimizer = th.optim.SparseAdam(list(embed_layer.module.node_embeds.parameters()), lr=args.lr)
             else:
-                emb_optimizer = th.optim.SparseAdam(list(embed_layer.node_embeds.parameters()), lr=args.lr)
+                emb_optimizer = FastSparseAdam(list(embed_layer.node_embeds.parameters()), lr=args.lr)
     else:
         all_params = list(model.parameters()) + list(embed_layer.parameters())
         optimizer = th.optim.Adam(all_params, lr=args.lr, weight_decay=args.l2norm)

@@ -93,7 +93,7 @@ class RelGraphEmbedLayer(nn.Module):
         for ntype in range(num_of_ntype):
             if input_size[ntype] is not None:
                 input_emb_size = input_size[ntype].shape[1]
-                embed = nn.Parameter(th.empty(input_emb_size, self.embed_size, device=self.dev_id))
+                embed = nn.Parameter(th.empty(input_emb_size, self.embed_size, device=dev_id))
                 nn.init.xavier_uniform_(embed)
                 self.embeds[str(ntype)] = embed
 
@@ -125,40 +125,19 @@ class RelGraphEmbedLayer(nn.Module):
         embeds = th.empty(node_ids.shape[0], self.embed_size, device=self.dev_id)
         nvtx.range_pop()
 
-        nvtx.range_push("bulk_embed")
-        locs = []
-        locs_prefix=[0]
-        for ntype in range(self.num_of_ntype):
-            if features[ntype] is None:
-                nvtx.range_push("generate_loc")
-                locs.append(loc_cpu[ntype])
-                locs_prefix.append(locs_prefix[-1]+locs[-1].shape[0])
-                nvtx.range_pop()
-
-        all_embed_locs = tsd_ids[th.cat(locs, 0)]
-        all_embed = self.node_embeds(all_embed_locs).pin_memory().to(self.dev_id, non_blocking=True)
-        nvtx.range_pop()
 
         for ntype in range(self.num_of_ntype):
+            nvtx.range_push("generate_loc")
+            loc = loc_cpu[ntype] 
+            loc_gpu = loc.to(self.dev_id, non_blocking=True)
+            nvtx.range_pop()
             if features[ntype] is not None:
-                nvtx.range_push("generate_loc")
-                loc = loc_cpu[ntype] 
-                loc_gpu = loc.to(self.dev_id, non_blocking=True)
-                nvtx.range_pop()
                 nvtx.range_push("embed_with_features")
                 embeds[loc_gpu] = features[ntype] @ self.embeds[str(ntype)]
                 nvtx.range_pop()
-
-        i = 0
-        for ntype in range(self.num_of_ntype):
-            if features[ntype] is None:
-                nvtx.range_push("generate_loc")
-                loc = loc_cpu[ntype] 
-                loc_gpu = loc.to(self.dev_id, non_blocking=True)
-                nvtx.range_pop()
+            else:
                 nvtx.range_push("embed_without_features")
-                embeds[loc_gpu] = all_embed[locs_prefix[i]:locs_prefix[i+1]]
-                i += 1
+                embeds[loc_gpu] = self.node_embeds(tsd_ids[loc]).to(self.dev_id, non_blocking=True)
                 nvtx.range_pop()
 
         return embeds
