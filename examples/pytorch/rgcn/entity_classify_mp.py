@@ -24,7 +24,7 @@ from dgl import DGLGraph
 from functools import partial
 
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
-from model import RelGraphEmbedLayer
+from model import RelGraphEmbedLayer, RelFeatLayer
 from sparse_optimizer import FastSparseAdam
 from dgl.nn import RelGraphConv
 from utils import thread_wrapped_func
@@ -239,6 +239,8 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                                           world_size=world_size,
                                           rank=dev_id)
 
+    feat_layer = RelFeatLayer(dev_id, g.number_of_nodes(), num_of_ntype, node_feats, args.n_hidden)
+
     # node features
     # None for one-hot feature, if not none, it should be the feature tensor.
     # 
@@ -275,11 +277,13 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
     if n_gpus > 1:
         labels = labels.to(dev_id)
         model.cuda(dev_id)
+        feat_layer.cuda(dev_id)
         if args.mix_cpu_gpu:
             embed_layer = DistributedDataParallel(embed_layer, device_ids=None, output_device=None)
         else:
             embed_layer.cuda(dev_id)
             embed_layer = DistributedDataParallel(embed_layer, device_ids=[dev_id], output_device=dev_id)
+        feat_layer = DistributedDataParallel(feat_layer, device_ids=[dev_id], output_device=dev_id)
         model = DistributedDataParallel(model, device_ids=[dev_id], output_device=dev_id)
 
     # optimizer
@@ -287,15 +291,14 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         dense_params = list(model.parameters())
         if args.node_feats:
             if  n_gpus > 1:
-                dense_params += list(embed_layer.module.embeds.parameters())
+                dense_params += list(feat_layer.module.embeds.parameters())
             else:
-                dense_params += list(embed_layer.embeds.parameters())
+                dense_params += list(feat_layer.embeds.parameters())
         optimizer = th.optim.Adam(dense_params, lr=args.lr, weight_decay=args.l2norm)
-        if embed_layer.node_embeds:
-            if  n_gpus > 1:
-                emb_optimizer = th.optim.SparseAdam(list(embed_layer.module.node_embeds.parameters()), lr=args.lr)
-            else:
-                emb_optimizer = FastSparseAdam(list(embed_layer.node_embeds.parameters()), lr=args.lr)
+        if  n_gpus > 1:
+            emb_optimizer = th.optim.SparseAdam(list(embed_layer.module.node_embeds.parameters()), lr=args.lr)
+        else:
+            emb_optimizer = FastSparseAdam(list(embed_layer.node_embeds.parameters()), lr=args.lr)
     else:
         all_params = list(model.parameters()) + list(embed_layer.parameters())
         optimizer = th.optim.Adam(all_params, lr=args.lr, weight_decay=args.l2norm)
@@ -329,34 +332,47 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                 if loc_cpu[ntype] is None:
                     loc_cpu[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
             nvtx.range_pop()
+
+            print("temp_feats")
+            tmp_feats = feat_layer(features_gpu)
                     
 
+            print("embedding")
             nvtx.range_push("embed_layer")
             feats = embed_layer(blocks[0].srcdata[dgl.NID],
                                 blocks[0].srcdata[dgl.NTYPE],
                                 blocks[0].srcdata['type_id'],
-                                features_gpu,
+                                tmp_feats,
                                 loc_cpu)
             nvtx.range_pop()
+
+            print("forward")
             nvtx.range_push("forward")
             logits = model(blocks, feats)
             nvtx.range_pop()
+
+            print("loss")
             nvtx.range_push("F.cross_entropy")
             loss = F.cross_entropy(logits, labels[seeds])
             nvtx.range_pop()
             t1 = time.time()
+
+            print("zero_grad")
             nvtx.range_push("zero_grad")
             optimizer.zero_grad()
             if args.sparse_embedding:
                 emb_optimizer.zero_grad()
             nvtx.range_pop()
 
+            print("backward")
             nvtx.range_push("loss.backward")
             loss.backward()
             nvtx.range_pop()
+            print("step_optimizer")
             nvtx.range_push("optimizer.step")
             optimizer.step()
             nvtx.range_pop()
+            print("step_emb_optimizer")
             nvtx.range_push("emb_optimizer.step")
             if args.sparse_embedding:
                 emb_optimizer.step()

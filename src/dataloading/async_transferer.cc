@@ -74,7 +74,7 @@ TransferId AsyncTransferer::StartTransfer(
     cudaEvent_t alloc_event;
     CUDA_CALL(cudaEventCreate(&alloc_event));
     CUDA_CALL(cudaEventRecord(alloc_event, 0));
-    CUDA_CALL(cudaStreamWaitEvent(static_cast<cudaStream_t>(stream_), alloc_event));
+    CUDA_CALL(cudaStreamWaitEvent(static_cast<cudaStream_t>(stream_), alloc_event, 0));
     CUDA_CALL(cudaEventDestroy(alloc_event));
 
     // get tensor information

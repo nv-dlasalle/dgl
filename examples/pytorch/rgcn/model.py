@@ -49,6 +49,40 @@ class BaseRGCN(nn.Module):
             h = layer(g, h, r, norm)
         return h
 
+
+class RelFeatLayer(nn.Module):
+    def __init__(self,
+                 dev_id,
+                 num_nodes,
+                 num_of_ntype,
+                 input_size,
+                 embed_size):
+        super(RelFeatLayer, self).__init__()
+        self.dev_id = th.device(dev_id if dev_id >= 0 else 'cpu')
+        self.embed_size = embed_size
+
+        # create weight embeddings for each node for each relation
+        self.embeds = nn.ParameterDict()
+        self.num_of_ntype = num_of_ntype
+
+        for ntype in range(num_of_ntype):
+            if input_size[ntype] is not None:
+                input_emb_size = input_size[ntype].shape[1]
+                embed = nn.Parameter(th.empty(input_emb_size, self.embed_size, device=self.dev_id))
+                nn.init.xavier_uniform_(embed)
+                self.embeds[str(ntype)] = embed
+
+
+    def forward(self, features):
+        new_feat = [None for i in range(self.num_of_ntype)] 
+        for ntype in range(self.num_of_ntype):
+            if features[ntype] is not None:
+                nvtx.range_push("embed_with_features")
+                new_feat[ntype] = features[ntype] @ self.embeds[str(ntype)]
+                nvtx.range_pop()
+
+        return new_feat 
+
 class RelGraphEmbedLayer(nn.Module):
     r"""Embedding layer for featureless heterograph.
     Parameters
@@ -86,16 +120,7 @@ class RelGraphEmbedLayer(nn.Module):
         self.sparse_emb = sparse_emb
 
         # create weight embeddings for each node for each relation
-        self.embeds = nn.ParameterDict()
         self.num_of_ntype = num_of_ntype
-        self.idmap = th.empty(num_nodes).long()
-
-        for ntype in range(num_of_ntype):
-            if input_size[ntype] is not None:
-                input_emb_size = input_size[ntype].shape[1]
-                embed = nn.Parameter(th.empty(input_emb_size, self.embed_size, device=dev_id))
-                nn.init.xavier_uniform_(embed)
-                self.embeds[str(ntype)] = embed
 
         self.node_embeds = th.nn.Embedding(node_tids.shape[0], self.embed_size, sparse=self.sparse_emb)
         nn.init.uniform_(self.node_embeds.weight, -1.0, 1.0)
@@ -119,12 +144,11 @@ class RelGraphEmbedLayer(nn.Module):
             embeddings as the input of the next layer
         """
         nvtx.range_push("node_ids_to_gpu")
-        tsd_ids = node_ids.to(self.node_embeds.weight.device)
+        tsd_ids = node_ids
         nvtx.range_pop()
         nvtx.range_push("alloc_empty_embds")
         embeds = th.empty(node_ids.shape[0], self.embed_size, device=self.dev_id)
         nvtx.range_pop()
-
 
         for ntype in range(self.num_of_ntype):
             nvtx.range_push("generate_loc")
@@ -133,7 +157,7 @@ class RelGraphEmbedLayer(nn.Module):
             nvtx.range_pop()
             if features[ntype] is not None:
                 nvtx.range_push("embed_with_features")
-                embeds[loc_gpu] = features[ntype] @ self.embeds[str(ntype)]
+                embeds[loc_gpu] = features[ntype]
                 nvtx.range_pop()
             else:
                 nvtx.range_push("embed_without_features")
