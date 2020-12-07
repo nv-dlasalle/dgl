@@ -151,15 +151,11 @@ class RelGraphEmbedLayer(nn.Module):
         nvtx.range_pop()
 
         for ntype in range(self.num_of_ntype):
-            nvtx.range_push("generate_loc")
-            loc = loc_cpu[ntype] 
-            loc_gpu = loc.to(self.dev_id, non_blocking=True)
-            nvtx.range_pop()
-            if features[ntype] is not None:
-                nvtx.range_push("embed_with_features")
-                embeds[loc_gpu] = features[ntype]
+            if features[ntype] is None:
+                nvtx.range_push("generate_loc")
+                loc = loc_cpu[ntype] 
+                loc_gpu = loc.to(self.dev_id, non_blocking=True)
                 nvtx.range_pop()
-            else:
                 nvtx.range_push("embed_without_features")
                 embeds[loc_gpu] = self.node_embeds(tsd_ids[loc]).to(self.dev_id, non_blocking=True)
                 nvtx.range_pop()

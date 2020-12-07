@@ -104,15 +104,19 @@ class FastSparseAdam(Optimizer):
                 nvtx.range_push("sparse_mask")
                 old_exp_avg_values = exp_avg.sparse_mask(grad)._values()
                 nvtx.range_pop()
+
                 nvtx.range_push("exp_avg_first")
                 exp_avg_update_values = grad_values.sub(old_exp_avg_values).mul_(1 - beta1)
-                exp_avg.add_(make_sparse(exp_avg_update_values))
+                #exp_avg.add_(make_sparse(exp_avg_update_values))
+                exp_avg[grad_indices] = exp_avg_update_values + old_exp_avg_values
                 nvtx.range_pop()
+
                 nvtx.range_push("exp_avg_second")
                 old_exp_avg_sq_values = exp_avg_sq.sparse_mask(grad)._values()
                 exp_avg_sq_update_values = grad_values.pow(2).sub_(old_exp_avg_sq_values).mul_(1 - beta2)
-                exp_avg_sq.add_(make_sparse(exp_avg_sq_update_values))
+                exp_avg_sq[grad_indices] = exp_avg_sq_update_values + old_exp_avg_sq_values
                 nvtx.range_pop()
+
                 nvtx.range_pop()
 
                 nvtx.range_push("optimizer.dense_addition")
@@ -137,10 +141,10 @@ class FastSparseAdam(Optimizer):
 
                 nvtx.range_push("optimizer.final_add")
                 nvtx.range_push("make_sparse")
-                delta = make_sparse(-step_size * numer.div_(denom))
+                delta = -step_size * numer.div_(denom)
                 nvtx.range_pop()
                 nvtx.range_push("add")
-                p.add_(delta)
+                p[grad_indices] = p.sparse_mask(grad)._values() + delta
                 nvtx.range_pop()
                 nvtx.range_pop()
 

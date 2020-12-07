@@ -110,7 +110,6 @@ class EntityClassify(nn.Module):
         i = 0
         for layer, block in zip(self.layers, blocks):
             nvtx.range_push("forward.layer_{}".format(i))
-            block = block.to(self.device)
             h = layer(block, h, block.edata['etype'], block.edata['norm'])
             nvtx.range_pop()
             i+=1
@@ -237,9 +236,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         th.distributed.init_process_group(backend=backend,
                                           init_method=dist_init_method,
                                           world_size=world_size,
-                                          rank=dev_id)
-
-    feat_layer = RelFeatLayer(dev_id, g.number_of_nodes(), num_of_ntype, node_feats, args.n_hidden)
+                                          rank=proc_id)
 
     # node features
     # None for one-hot feature, if not none, it should be the feature tensor.
@@ -251,6 +248,8 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                                      node_feats,
                                      args.n_hidden,
                                      sparse_emb=args.sparse_embedding)
+
+    feat_layer = RelFeatLayer(dev_id, g.number_of_nodes(), num_of_ntype, node_feats, args.n_hidden)
 
     # create model
     # all model params are in device.
@@ -296,7 +295,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                 dense_params += list(feat_layer.embeds.parameters())
         optimizer = th.optim.Adam(dense_params, lr=args.lr, weight_decay=args.l2norm)
         if  n_gpus > 1:
-            emb_optimizer = th.optim.SparseAdam(list(embed_layer.module.node_embeds.parameters()), lr=args.lr)
+            emb_optimizer = FastSparseAdam(list(embed_layer.module.node_embeds.parameters()), lr=args.lr)
         else:
             emb_optimizer = FastSparseAdam(list(embed_layer.node_embeds.parameters()), lr=args.lr)
     else:
@@ -317,47 +316,45 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             seeds, blocks = sample_data
             t0 = time.time()
 
-            nvtx.range_push("features_to_gpu")
-            features_gpu = [None for i in range(num_of_ntype)]
+            blocks_gpu = [block.to(dev_id, non_blocking=True) for block in blocks]
+
             loc_cpu = [None for i in range(num_of_ntype)]
             for ntype in range(num_of_ntype):
+                loc_cpu[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
+
+            nvtx.range_push("features_to_gpu")
+            features_gpu = [None for i in range(num_of_ntype)]
+            for ntype in range(num_of_ntype):
                 if node_feats[ntype] is not None:
-                    loc_cpu[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
                     features_cpu = th.empty((loc_cpu[ntype].shape[0], node_feats[ntype].shape[1]), pin_memory=True)
                     th.index_select(node_feats[ntype], 0, loc_cpu[ntype], out=features_cpu)
                     features_gpu[ntype] = features_cpu.to(devices[proc_id], non_blocking=True)
-    
-            # generate remaining locs while gpu transfer takes place
-            for ntype in range(num_of_ntype):
-                if loc_cpu[ntype] is None:
-                    loc_cpu[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
             nvtx.range_pop()
 
-            print("temp_feats")
-            tmp_feats = feat_layer(features_gpu)
-                    
-
-            print("embedding")
             nvtx.range_push("embed_layer")
             feats = embed_layer(blocks[0].srcdata[dgl.NID],
                                 blocks[0].srcdata[dgl.NTYPE],
                                 blocks[0].srcdata['type_id'],
-                                tmp_feats,
+                                node_feats,
                                 loc_cpu)
             nvtx.range_pop()
 
-            print("forward")
+
+            tmp_feats = feat_layer(features_gpu)
+            for ntype in range(num_of_ntype):
+                if node_feats[ntype] is not None:
+                    loc_gpu = loc_cpu[ntype].to(dev_id, non_blocking=True)
+                    feats[loc_gpu] = tmp_feats[ntype]
+
             nvtx.range_push("forward")
-            logits = model(blocks, feats)
+            logits = model(blocks_gpu, feats)
             nvtx.range_pop()
 
-            print("loss")
             nvtx.range_push("F.cross_entropy")
             loss = F.cross_entropy(logits, labels[seeds])
             nvtx.range_pop()
             t1 = time.time()
 
-            print("zero_grad")
             nvtx.range_push("zero_grad")
             optimizer.zero_grad()
             if args.sparse_embedding:
@@ -368,11 +365,11 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             nvtx.range_push("loss.backward")
             loss.backward()
             nvtx.range_pop()
-            print("step_optimizer")
+            print("backward_finished")
             nvtx.range_push("optimizer.step")
             optimizer.step()
             nvtx.range_pop()
-            print("step_emb_optimizer")
+
             nvtx.range_push("emb_optimizer.step")
             if args.sparse_embedding:
                 emb_optimizer.step()
