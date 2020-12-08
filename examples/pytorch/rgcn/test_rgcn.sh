@@ -2,7 +2,7 @@
 
 GPUS="${1}"
 
-NSYS="nsys profile -o /tmp/rgcn_base -f true --trace=nvtx,cuda -s none -b none"
+#NSYS="nsys profile -o /tmp/rgcn_base -f true --trace=nvtx,cuda -s none -b none"
 
 DGL_USE_CUDA_MEMORY_POOL=1 OMP_NUM_THREADS=6 ${NSYS} python3 entity_classify_mp.py -d ogbn-mag \
   --testing --fanout='25,30' --batch-size 512 --n-hidden 64 --lr 0.01 \

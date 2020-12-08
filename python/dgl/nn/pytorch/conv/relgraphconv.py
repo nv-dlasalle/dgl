@@ -199,15 +199,15 @@ class RelGraphConv(nn.Module):
         # calculate msg @ W_r before put msg into edge
         # if src is th.int64 we expect it is an index select
         if edges.src['h'].dtype != th.int64 and self.low_mem:
-            etypes = th.unique(edges.data['type'])
             msg = th.empty((edges.src['h'].shape[0], self.out_feat),
                            device=edges.src['h'].device)
-            for etype in etypes:
-                loc = edges.data['type'] == etype
-                w = weight[etype]
-                src = edges.src['h'][loc]
-                sub_msg = th.matmul(src, w)
-                msg[loc] = sub_msg
+            for etype in range(self.num_rels):
+                loc = (edges.data['type'] == etype).nonzero()
+                if loc.shape[0] > 0:
+                    w = weight[etype]
+                    src = edges.src['h'][loc]
+                    sub_msg = th.matmul(src, w)
+                    msg[loc] = sub_msg
         else:
             # put W_r into edges then do msg @ W_r
             msg = utils.bmm_maybe_select(edges.src['h'], weight, edges.data['type'])
