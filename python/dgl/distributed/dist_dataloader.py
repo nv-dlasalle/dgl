@@ -3,6 +3,7 @@
 import multiprocessing as mp
 from queue import Queue
 import traceback
+from torch.cuda import nvtx
 
 from .dist_context import get_sampler_pool
 from .. import backend as F
@@ -160,9 +161,11 @@ class DistDataLoader:
         for _ in range(num_reqs):
             self._request_next_batch()
         if self.recv_idxs < self.expected_idxs:
+            nvtx.range_push("get_from_queue")
             result = self.queue.get(timeout=1800)
             self.recv_idxs += 1
             self.num_pending -= 1
+            nvtx.range_pop()
             return result
         else:
             assert self.num_pending == 0
@@ -170,13 +173,16 @@ class DistDataLoader:
 
     def __iter__(self):
         if self.shuffle:
+            nvtx.range_push("F.shuffle")
             self.dataset = F.rand_shuffle(self.dataset)
+            nvtx.range_pop()
         self.recv_idxs = 0
         self.current_pos = 0
         self.num_pending = 0
         return self
 
     def _request_next_batch(self):
+        nvtx.range_push("_request_next_batch")
         next_data = self._next_data()
         if next_data is None:
             return
@@ -185,6 +191,7 @@ class DistDataLoader:
         else:
             result = self.collate_fn(next_data)
             self.queue.put(result)
+        nvtx.range_pop()
         self.num_pending += 1
 
     def _next_data(self):

@@ -383,8 +383,6 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                 print("Step: {:05d}/{:05d}:{:05d} | Train Accuracy: {:.4f} | Train Loss: {:.4f}".
                     format(i, len(loader), epoch, train_acc, loss.item()))
 
-            if i >= 100:
-                break
 
         toc = time.time()
         if proc_id == 0:

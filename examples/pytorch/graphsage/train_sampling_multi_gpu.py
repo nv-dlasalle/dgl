@@ -30,24 +30,42 @@ class PrefetchingIterator:
         self.async_ = AsyncTransferer(dev_id)
         self.fetched_ = None
 
-    def __next__(self):
-        nvtx.range_push("prefetch")
+    def get_next(self):
+        ret = None
+        try:
+            nvtx.range_push("NodeDataLoader.next()")
+            ret = next(self.iter_)
+        finally:
+            nvtx.range_pop()
+        return ret
+            
 
+    def __next__(self):
         if self.fetched_ is None:
-            # directly load everything
-            input_nodes, seeds, blocks = next(self.iter_)
-            inputs, labels = load_subtensor(self.g_, self.g_.ndata['labels'],
-                    seeds, input_nodes, self.dev_id_)
-            blocks = [block.int().to(self.dev_id_) for block in blocks]
+            try:
+                nvtx.range_push("__next__.no_prefetch")
+                # directly load everything
+                input_nodes, seeds, blocks = self.get_next() 
+                inputs, labels = load_subtensor(self.g_, self.g_.ndata['labels'],
+                        seeds, input_nodes, self.dev_id_)
+                blocks = [block.to(self.dev_id_) for block in blocks]
+            finally:
+                nvtx.range_pop()
 
         if self.dev_id_ != 'cpu':
+            nvtx.range_push("prefetch")
             # initiate next fetch
-            input_nodes, seeds, next_blocks = next(self.iter_)
-            next_blocks = [block.int().to(self.dev_id_) for block in next_blocks]
-            next_inputs, next_labels = load_subtensor_future(
-                self.g_, self.g_.ndata['labels'], seeds,
-                input_nodes,  self.dev_id_, self.async_)
-            next_fetch = (next_inputs, next_labels, next_blocks)
+            next_fetch = None
+            try:
+                input_nodes, seeds, next_blocks = self.get_next()
+                next_blocks = [block.to(self.dev_id_) for block in next_blocks]
+                next_inputs, next_labels = load_subtensor_future(
+                    self.g_, self.g_.ndata['labels'], seeds,
+                    input_nodes,  self.dev_id_, self.async_)
+                next_fetch = (next_inputs, next_labels, next_blocks)
+            except StopIteration:
+                # nothing to fetch
+                pass
 
             if self.fetched_:
                 # grap futures
@@ -56,9 +74,8 @@ class PrefetchingIterator:
                 inputs = inputs_future.wait()
                 labels = labels_future
             self.fetched_ = next_fetch
+            nvtx.range_pop()
 
-        nvtx.range_pop()
-        
         return (blocks, inputs, labels)
         
 
@@ -70,8 +87,13 @@ class PrefetchingNodeDataLoader:
 
     def __iter__(self):
         """Return the iterator of the data loader."""
-        return PrefetchingIterator(self.dataloader_.__iter__(), self.dev_id_,
-            self.g_)
+        nvtx.range_push("create_node_iterator")
+        it = self.dataloader_.__iter__()
+        nvtx.range_pop()
+        nvtx.range_push("create_prefetching_iterator")
+        ret = PrefetchingIterator(it, self.dev_id_, self.g_)
+        nvtx.range_pop()
+        return ret
 
     def __len__(self):
         """Return the number of batches of the data loader."""
@@ -138,7 +160,7 @@ class SAGE(nn.Module):
             for input_nodes, output_nodes, blocks in tqdm.tqdm(dataloader):
                 block = blocks[0]
 
-                block = block.int().to(device)
+                block = block.to(device)
                 h = x[input_nodes].to(device)
                 h = layer(block, h)
                 if l != len(self.layers) - 1:
@@ -185,7 +207,7 @@ def load_subtensor(g, labels, seeds, input_nodes, dev_id):
         batch_inputs = g.ndata['features'][input_nodes].to(dev_id)
     nvtx.range_pop()
     nvtx.range_push("batch_labels_to_gpu")
-    batch_labels = labels[seeds].to(dev_id, non_blocking=True)
+    batch_labels = labels[seeds].to(dev_id, non_blocking=True).long()
     nvtx.range_pop()
     return batch_inputs, batch_labels
 
@@ -195,7 +217,7 @@ def load_subtensor_future(g, labels, seeds, input_nodes, dev_id, transfer):
     Copys features and labels of a set of nodes onto GPU.
     """
     nvtx.range_push("batch_labels_to_gpu_async")
-    batch_labels = labels[seeds].to(dev_id, non_blocking=True)
+    batch_labels = labels[seeds].to(dev_id, non_blocking=True).long()
     nvtx.range_pop()
 
     nvtx.range_push("batch_inputs_to_gpu_async")
@@ -263,9 +285,9 @@ def run(proc_id, n_gpus, args, devices, data):
 
         # Loop over the dataloader to sample the computation dependency graph as a list of
         # blocks.
+        nvtx.range_push("epoch_{}".format(epoch))
         for step, (blocks, batch_inputs, batch_labels) in enumerate(dataloader):
-            if proc_id == 0:
-                tic_step = time.time()
+            tic_step = time.time()
 
             count = batch_labels.shape[0]
 
@@ -304,9 +326,13 @@ def run(proc_id, n_gpus, args, devices, data):
                     epoch, step, loss.item(), acc.item(), np.mean(iter_tput[3:]), th.cuda.max_memory_allocated() / 1000000))
             nvtx.range_pop()
 
+        nvtx.range_push("sync")
         if n_gpus > 1:
             th.distributed.barrier()
+        nvtx.range_pop()
+        nvtx.range_pop()
 
+        nvtx.range_push("epoch_reporting")
         toc = time.time()
         if proc_id == 0:
             print('Epoch Time(s): {:.4f}'.format(toc - tic))
@@ -326,6 +352,7 @@ def run(proc_id, n_gpus, args, devices, data):
                 print('Eval Acc {:.4f}'.format(eval_acc))
                 print('Test Acc: {:.4f}'.format(test_acc))
 
+        nvtx.range_pop()
 
     if n_gpus > 1:
         th.distributed.barrier()
@@ -361,9 +388,10 @@ if __name__ == '__main__':
         g, n_classes = load_ogb(args.dataset)
 
     # Construct graph
-    g = dgl.as_heterograph(g)
+    #g = dgl.as_heterograph(g)
     in_feats = g.ndata['features'].shape[1]
 
+    print("Splitting...")
     if args.inductive:
         train_g, val_g, test_g = inductive_split(g)
     else:
@@ -371,12 +399,14 @@ if __name__ == '__main__':
 
     # Create csr/coo/csc formats before launching training processes with multi-gpu.
     # This avoids creating certain formats in each sub-process, which saves momory and CPU.
+    print("Creating formats...")
     train_g.create_formats_()
     val_g.create_formats_()
     test_g.create_formats_()
     # Pack data
     data = in_feats, n_classes, train_g, val_g, test_g
 
+    print("Launching run...")
     if n_gpus == 1:
         if devices[0] < 0:
             devices[0] = 'cpu'

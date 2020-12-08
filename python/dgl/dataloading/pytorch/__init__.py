@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from ..dataloader import NodeCollator, EdgeCollator
 from ...distributed import DistGraph
 from ...distributed import DistDataLoader
+from torch.cuda import nvtx
 
 def _remove_kwargs_dist(kwargs):
     if 'num_workers' in kwargs:
@@ -138,8 +139,10 @@ class _EdgeCollator(EdgeCollator):
 
 class _NodeDataLoaderIter:
     def __init__(self, node_dataloader):
+        nvtx.range_push("_NodeDataLoaderIter.__init__()")
         self.node_dataloader = node_dataloader
         self.iter_ = iter(node_dataloader.dataloader)
+        nvtx.range_pop()
 
     def __next__(self):
         input_nodes, output_nodes, blocks = next(self.iter_)
