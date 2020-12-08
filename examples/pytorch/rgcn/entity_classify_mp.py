@@ -383,12 +383,13 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                 print("Step: {:05d}/{:05d}:{:05d} | Train Accuracy: {:.4f} | Train Loss: {:.4f}".
                     format(i, len(loader), epoch, train_acc, loss.item()))
 
-            # delete me
             if i >= 100:
                 break
+
         toc = time.time()
-        print("Epoch time: {:.05f}".format(toc-tic))
-        print("Epoch {:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f}".
+        if proc_id == 0:
+            print("Epoch time: {:.05f}".format(toc-tic))
+            print("Epoch {:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f}".
             format(epoch, forward_time[-1], backward_time[-1]))
 
         if n_gpus > 1:
@@ -398,10 +399,11 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
     if n_gpus > 1:
         th.distributed.barrier()
 
-    print("{}/{} Mean forward time: {:4f}".format(proc_id, n_gpus,
-                                                  np.mean(forward_time[len(forward_time) // 4:])))
-    print("{}/{} Mean backward time: {:4f}".format(proc_id, n_gpus,
-                                                   np.mean(backward_time[len(backward_time) // 4:])))
+    if proc_id == 0:
+        print("{}/{} Mean forward time: {:4f}".format(proc_id, n_gpus,
+                                                      np.mean(forward_time[len(forward_time) // 4:])))
+        print("{}/{} Mean backward time: {:4f}".format(proc_id, n_gpus,
+                                                       np.mean(backward_time[len(backward_time) // 4:])))
 
 def main(args, devices):
     # load graph data
