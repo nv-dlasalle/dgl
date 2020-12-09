@@ -232,7 +232,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         backend = 'nccl'
 
         # using sparse embedding or usig mix_cpu_gpu model (embedding model can not be stored in GPU)
-        if args.sparse_embedding or args.mix_cpu_gpu:
+        if args.sparse_embedding or args.mix_cpu_gpu or dev_id < 0:
             backend = 'gloo'
         th.distributed.init_process_group(backend=backend,
                                           init_method=dist_init_method,
@@ -275,16 +275,21 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             embed_layer.cuda(dev_id)
 
     if n_gpus > 1:
-        labels = labels.to(dev_id)
-        model.cuda(dev_id)
-        feat_layer.cuda(dev_id)
-        if args.mix_cpu_gpu:
+        if args.mix_cpu_gpu or dev_id < 0:
             embed_layer = DistributedDataParallel(embed_layer, device_ids=None, output_device=None)
         else:
             embed_layer.cuda(dev_id)
             embed_layer = DistributedDataParallel(embed_layer, device_ids=[dev_id], output_device=dev_id)
-        feat_layer = DistributedDataParallel(feat_layer, device_ids=[dev_id], output_device=dev_id)
-        model = DistributedDataParallel(model, device_ids=[dev_id], output_device=dev_id)
+
+        if dev_id < 0:
+            feat_layer = DistributedDataParallel(feat_layer, device_ids=None, output_device=None)
+            model = DistributedDataParallel(model, device_ids=None, output_device=None)
+        else:
+            labels = labels.to(dev_id)
+            model.cuda(dev_id)
+            feat_layer.cuda(dev_id)
+            feat_layer = DistributedDataParallel(feat_layer, device_ids=[dev_id], output_device=dev_id)
+            model = DistributedDataParallel(model, device_ids=[dev_id], output_device=dev_id)
 
     # optimizer
     if args.sparse_embedding:
@@ -525,13 +530,11 @@ def main(args, devices):
     g.create_formats_()
 
     n_gpus = len(devices)
-    # cpu
-    if devices[0] == -1:
-        run(0, 0, args, ['cpu'],
-            (g, node_feats, num_of_ntype, num_classes, num_rels, target_idx,
-             train_idx, val_idx, test_idx, labels), None, None)
-    # gpu
-    elif n_gpus == 1:
+    for i in range(len(devices)):
+        if devices[i] == -1:
+            devices[i] = 'cpu'
+
+    if n_gpus == 1:
         run(0, n_gpus, args, devices,
             (g, node_feats, num_of_ntype, num_classes, num_rels, target_idx,
             train_idx, val_idx, test_idx, labels), None, None)
