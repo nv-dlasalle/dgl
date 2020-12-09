@@ -206,7 +206,8 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                         batch_size=args.batch_size,
                         collate_fn=sampler.sample_blocks,
                         shuffle=True,
-                        num_workers=args.num_workers)
+                        num_workers=args.num_workers,
+                        persistent_workers=True)
 
     # validation sampler
     val_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)

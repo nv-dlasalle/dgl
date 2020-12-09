@@ -21,7 +21,6 @@ import traceback
 from utils import thread_wrapped_func
 from load_graph import load_ogb, load_reddit, inductive_split
 
-
 class PrefetchingIterator:
     def __init__(self, i, dev_id, g):
         self.iter_ = i
@@ -153,7 +152,7 @@ class SAGE(nn.Module):
                 th.arange(g.number_of_nodes()),
                 sampler,
                 batch_size=args.batch_size,
-                shuffle=True,
+                shuffle=False,
                 drop_last=False,
                 num_workers=args.num_workers)
 
@@ -266,7 +265,8 @@ def run(proc_id, n_gpus, args, devices, data):
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=False,
-        num_workers=args.num_workers)
+        num_workers=args.num_workers,
+        persistent_workers=True)
 
     # Define model and optimizer
     model = SAGE(in_feats, args.num_hidden, n_classes, args.num_layers, F.relu, args.dropout)
@@ -388,7 +388,6 @@ if __name__ == '__main__':
         g, n_classes = load_ogb(args.dataset)
 
     # Construct graph
-    #g = dgl.as_heterograph(g)
     in_feats = g.ndata['features'].shape[1]
 
     print("Splitting...")
