@@ -235,7 +235,11 @@ def run(proc_id, n_gpus, args, devices, data):
         dist_init_method = 'tcp://{master_ip}:{master_port}'.format(
             master_ip='127.0.0.1', master_port='12345')
         world_size = n_gpus
-        th.distributed.init_process_group(backend="nccl",
+        backend = "nccl"
+        if dev_id == 'cpu':
+            backend = "gloo"
+        print("Using backend '{}' for '{}'".format(backend, dev_id))
+        th.distributed.init_process_group(backend=backend,
                                           init_method=dist_init_method,
                                           world_size=world_size,
                                           rank=proc_id)
@@ -272,7 +276,10 @@ def run(proc_id, n_gpus, args, devices, data):
     model = SAGE(in_feats, args.num_hidden, n_classes, args.num_layers, F.relu, args.dropout)
     model = model.to(dev_id)
     if n_gpus > 1:
-        model = DistributedDataParallel(model, device_ids=[dev_id], output_device=dev_id)
+        if dev_id != 'cpu':
+            model = DistributedDataParallel(model, device_ids=[dev_id], output_device=dev_id)
+        else:
+            model = DistributedDataParallel(model, device_ids=None, output_device=None)
     loss_fcn = nn.CrossEntropyLoss()
     loss_fcn = loss_fcn.to(dev_id)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -405,10 +412,12 @@ if __name__ == '__main__':
     # Pack data
     data = in_feats, n_classes, train_g, val_g, test_g
 
+    for i in range(len(devices)):
+        if devices[i] < 0:
+            devices[i] = 'cpu'
+
     print("Launching run...")
     if n_gpus == 1:
-        if devices[0] < 0:
-            devices[0] = 'cpu'
         run(0, n_gpus, args, devices, data)
     else:
         procs = []
