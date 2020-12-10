@@ -165,7 +165,7 @@ class NeighborSampler:
             blocks.insert(0, block)
         return seeds, blocks
 
-def evaluate(model, embed_layer, eval_loader, node_feats):
+def evaluate(model, embed_layer, feat_layer, eval_loader, node_feats):
     model.eval()
     embed_layer.eval()
     eval_logits = []
@@ -266,6 +266,10 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                            low_mem=args.low_mem,
                            layer_norm=args.layer_norm)
 
+    multilabel = len(labels.shape) > 1
+    loss_func = nn.BCEWithLogitsLoss() if multilabel else nn.CrossEntropyLoss()
+    loss_func.to(th.device(dev_id if dev_id >= 0 else 'cpu'))
+
     if dev_id >= 0 and n_gpus == 1:
         th.cuda.set_device(dev_id)
         labels = labels.to(dev_id)
@@ -317,6 +321,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         model.train()
         embed_layer.train()
 
+        loss = []
         tic = time.time()
         for i, sample_data in enumerate(loader):
             seeds, blocks = sample_data
@@ -333,7 +338,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             for ntype in range(num_of_ntype):
                 if node_feats[ntype] is not None:
                     features_cpu = th.empty((loc_cpu[ntype].shape[0], node_feats[ntype].shape[1]), pin_memory=True)
-                    th.index_select(node_feats[ntype], 0, loc_cpu[ntype], out=features_cpu)
+                    th.index_select(node_feats[ntype], 0, blocks[0].srcdata['type_id'][loc_cpu[ntype]], out=features_cpu)
                     features_gpu[ntype] = features_cpu.to(devices[proc_id], non_blocking=True)
             nvtx.range_pop()
 
@@ -357,7 +362,9 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             nvtx.range_pop()
 
             nvtx.range_push("F.cross_entropy")
-            loss = F.cross_entropy(logits, labels[seeds])
+            label = labels[seeds]
+            label = label.float() if multilabel else label.long()
+            loss = loss_func(logits, label)
             nvtx.range_pop()
             t1 = time.time()
 
@@ -385,9 +392,8 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             backward_time.append(t2 - t1)
 
             if i % 20 == 0 and proc_id == 0:
-                train_acc = th.sum(logits.argmax(dim=1) == labels[seeds]).item() / len(seeds)
-                print("Step: {:05d}/{:05d}:{:05d} | Train Accuracy: {:.4f} | Train Loss: {:.4f}".
-                    format(i, len(loader), epoch, train_acc, loss.item()))
+                print("Step: {:05d}/{:05d}:{:05d} | Train Loss: {:.4f}".
+                    format(i, len(loader), epoch, loss.item()))
 
 
         toc = time.time()
@@ -409,9 +415,102 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         print("{}/{} Mean backward time: {:4f}".format(proc_id, n_gpus,
                                                        np.mean(backward_time[len(backward_time) // 4:])))
 
-def main(args, devices):
-    # load graph data
-    ogb_dataset = False
+def load_mag(args):
+    dataset = DglNodePropPredDataset(name=args.dataset)
+    split_idx = dataset.get_idx_split()
+    train_idx = split_idx["train"]['paper']
+    val_idx = split_idx["valid"]['paper']
+    test_idx = split_idx["test"]['paper']
+    hg_orig, labels = dataset[0]
+    subgs = {}
+    for etype in hg_orig.canonical_etypes:
+        u, v = hg_orig.all_edges(etype=etype)
+        subgs[etype] = (u, v)
+        subgs[(etype[2], 'rev-'+etype[1], etype[0])] = (v, u)
+    hg = dgl.heterograph(subgs)
+    hg.nodes['paper'].data['feat'] = hg_orig.nodes['paper'].data['feat']
+    labels = labels['paper'].squeeze()
+
+    num_rels = len(hg.canonical_etypes)
+    num_of_ntype = len(hg.ntypes)
+    num_classes = dataset.num_classes
+    print('Number of relations: {}'.format(num_rels))
+    print('Number of class: {}'.format(num_classes))
+    print('Number of train: {}'.format(len(train_idx)))
+    print('Number of valid: {}'.format(len(val_idx)))
+    print('Number of test: {}'.format(len(test_idx)))
+
+    if args.node_feats:
+        node_feats = []
+        for ntype in hg.ntypes:
+            if len(hg.nodes[ntype].data) == 0:
+                node_feats.append(None)
+            else:
+                assert len(hg.nodes[ntype].data) == 1
+                feat = hg.nodes[ntype].data.pop('feat')
+                node_feats.append(feat.share_memory_())
+    else:
+        node_feats = [None] * num_of_ntype
+    category = 'paper'
+    return hg, node_feats, labels, train_idx, val_idx, test_idx, category, num_classes
+
+def load_oag(args):
+    dataset = dgl.load_graphs(args.dataset)[0]
+    hg = dataset[0]
+
+    # Construct node features.
+    # TODO(zhengda) we need to construct the node features for author nodes.
+    if args.node_feats:
+        node_feats = []
+        for ntype in hg.ntypes:
+            if 'emb' in hg.nodes[ntype].data:
+                feat = hg.nodes[ntype].data.pop('emb')
+                node_feats.append(feat.share_memory_())
+            else:
+                node_feats.append(None)
+    else:
+        node_feats = [None] * len(hg.ntypes)
+
+    # Construct labels of paper nodes
+    ss, dd = hg.edges(etype=('field', 'rev_PF_in_L1', 'paper'))
+    ssu_, ssu = th.unique(ss, return_inverse=True)
+    print('Full label set size:', len(ssu_))
+    paper_labels = th.zeros(hg.num_nodes('paper'), len(ssu_), dtype=th.bool)
+    paper_labels[dd, ssu] = True
+
+    # Split the dataset into training, validation and testing.
+    label_sum = paper_labels.sum(1)
+    valid_labal_idx = th.nonzero(label_sum > 0, as_tuple=True)[0]
+    train_size = int(len(valid_labal_idx) * 0.8)
+    val_size = int(len(valid_labal_idx) * 0.1)
+    test_size = len(valid_labal_idx) - train_size - val_size
+    train_idx, val_idx, test_idx = valid_labal_idx[th.randperm(len(valid_labal_idx))].split([train_size, val_size, test_size])
+
+    # Remove infrequent labels. Otherwise, some of the labels will not have instances
+    # in the training, validation or test set.
+    label_filter = paper_labels[train_idx].sum(0) > 100
+    label_filter = th.logical_and(label_filter, paper_labels[val_idx].sum(0) > 100)
+    label_filter = th.logical_and(label_filter, paper_labels[test_idx].sum(0) > 100)
+    paper_labels = paper_labels[:,label_filter]
+    print('#labels:', paper_labels.shape[1])
+
+    # Adjust training, validation and testing set to make sure all paper nodes
+    # in these sets have labels.
+    train_idx = train_idx[paper_labels[train_idx].sum(1) > 0]
+    val_idx = val_idx[paper_labels[val_idx].sum(1) > 0]
+    test_idx = test_idx[paper_labels[test_idx].sum(1) > 0]
+    # All labels have instances.
+    assert np.all(paper_labels[train_idx].sum(0).numpy() > 0)
+    assert np.all(paper_labels[val_idx].sum(0).numpy() > 0)
+    assert np.all(paper_labels[test_idx].sum(0).numpy() > 0)
+    # All instances have labels.
+    assert np.all(paper_labels[train_idx].sum(1).numpy() > 0)
+    assert np.all(paper_labels[val_idx].sum(1).numpy() > 0)
+    assert np.all(paper_labels[test_idx].sum(1).numpy() > 0)
+    category = 'paper'
+    return hg, node_feats, paper_labels, train_idx, val_idx, test_idx, category, paper_labels.shape[1]
+
+def load_others(args):
     if args.dataset == 'aifb':
         dataset = AIFBDataset()
     elif args.dataset == 'mutag':
@@ -420,72 +519,41 @@ def main(args, devices):
         dataset = BGSDataset()
     elif args.dataset == 'am':
         dataset = AMDataset()
-    elif args.dataset == 'ogbn-mag':
-        dataset = DglNodePropPredDataset(name=args.dataset)
-        ogb_dataset = True
     else:
         raise ValueError()
+    # Load from hetero-graph
+    hg = dataset[0]
 
-    if ogb_dataset is True:
-        split_idx = dataset.get_idx_split()
-        train_idx = split_idx["train"]['paper']
-        val_idx = split_idx["valid"]['paper']
-        test_idx = split_idx["test"]['paper']
-        hg_orig, labels = dataset[0]
-        subgs = {}
-        for etype in hg_orig.canonical_etypes:
-            u, v = hg_orig.all_edges(etype=etype)
-            subgs[etype] = (u, v)
-            subgs[(etype[2], 'rev-'+etype[1], etype[0])] = (v, u)
-        hg = dgl.heterograph(subgs)
-        hg.nodes['paper'].data['feat'] = hg_orig.nodes['paper'].data['feat']
-        labels = labels['paper'].squeeze()
+    num_rels = len(hg.canonical_etypes)
+    num_of_ntype = len(hg.ntypes)
+    category = dataset.predict_category
+    num_classes = dataset.num_classes
+    train_mask = hg.nodes[category].data.pop('train_mask')
+    test_mask = hg.nodes[category].data.pop('test_mask')
+    labels = hg.nodes[category].data.pop('labels')
+    train_idx = th.nonzero(train_mask).squeeze()
+    test_idx = th.nonzero(test_mask).squeeze()
+    node_feats = [None] * num_of_ntype
 
-        num_rels = len(hg.canonical_etypes)
-        num_of_ntype = len(hg.ntypes)
-        num_classes = dataset.num_classes
-        if args.dataset == 'ogbn-mag':
-            category = 'paper'
-        print('Number of relations: {}'.format(num_rels))
-        print('Number of class: {}'.format(num_classes))
-        print('Number of train: {}'.format(len(train_idx)))
-        print('Number of valid: {}'.format(len(val_idx)))
-        print('Number of test: {}'.format(len(test_idx)))
-
-        if args.node_feats:
-            node_feats = []
-            for ntype in hg.ntypes:
-                if len(hg.nodes[ntype].data) == 0:
-                    node_feats.append(None)
-                else:
-                    assert len(hg.nodes[ntype].data) == 1
-                    feat = hg.nodes[ntype].data.pop('feat')
-                    node_feats.append(feat.share_memory_())
-        else:
-            node_feats = [None] * num_of_ntype
+    # AIFB, MUTAG, BGS and AM datasets do not provide validation set split.
+    # Split train set into train and validation if args.validation is set
+    # otherwise use train set as the validation set.
+    if args.validation:
+        val_idx = train_idx[:len(train_idx) // 5]
+        train_idx = train_idx[len(train_idx) // 5:]
     else:
-        # Load from hetero-graph
-        hg = dataset[0]
+        val_idx = train_idx
+    return hg, node_feats, labels, train_idx, val_idx, test_idx, category, num_classes
 
-        num_rels = len(hg.canonical_etypes)
-        num_of_ntype = len(hg.ntypes)
-        category = dataset.predict_category
-        num_classes = dataset.num_classes
-        train_mask = hg.nodes[category].data.pop('train_mask')
-        test_mask = hg.nodes[category].data.pop('test_mask')
-        labels = hg.nodes[category].data.pop('labels')
-        train_idx = th.nonzero(train_mask).squeeze()
-        test_idx = th.nonzero(test_mask).squeeze()
-        node_feats = [None] * num_of_ntype
 
-        # AIFB, MUTAG, BGS and AM datasets do not provide validation set split.
-        # Split train set into train and validation if args.validation is set
-        # otherwise use train set as the validation set.
-        if args.validation:
-            val_idx = train_idx[:len(train_idx) // 5]
-            train_idx = train_idx[len(train_idx) // 5:]
-        else:
-            val_idx = train_idx
+def main(args, devices):
+    # load graph data
+    if args.dataset == 'ogbn-mag':
+        hg, node_feats, labels, train_idx, val_idx, test_idx, category, num_classes = load_mag(args)
+    elif 'oag' in args.dataset:
+        hg, node_feats, labels, train_idx, val_idx, test_idx, category, num_classes = load_oag(args)
+    else:
+        hg, node_feats, labels, train_idx, val_idx, test_idx, category, num_classes = load_others(args)
 
     # calculate norm for each edge type and store in edge
     if args.global_norm is False:
@@ -502,6 +570,9 @@ def main(args, devices):
     for i, ntype in enumerate(hg.ntypes):
         if ntype == category:
             category_id = i
+
+    num_of_ntype = len(hg.ntypes)
+    num_rels = len(hg.etypes)
 
     g = dgl.to_homogeneous(hg, edata=['norm'])
     if args.global_norm:
