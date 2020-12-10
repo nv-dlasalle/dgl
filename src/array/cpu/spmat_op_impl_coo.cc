@@ -358,16 +358,21 @@ CSRMatrix COOToCSR(COOMatrix coo) {
     {
       const int num_threads = omp_get_num_threads();
       const int thread_id = omp_get_thread_num();
-      const int64_t nz_start = thread_id*(NNZ/num_threads);
-      const int64_t nz_end = std::min(NNZ, nz_start+(NNZ/num_threads));
+      CHECK_LT(thread_id, num_threads);
 
-      const int64_t n_start = thread_id*(N/num_threads);
-      const int64_t n_end = std::min(N, n_start+(N/num_threads));
+      const int64_t nz_chunk = (NNZ+num_threads-1)/num_threads;
+      const int64_t nz_start = thread_id*nz_chunk;
+      const int64_t nz_end = std::min(NNZ, nz_start+nz_chunk);
+
+      const int64_t n_chunk = (N+num_threads-1)/num_threads;
+      const int64_t n_start = thread_id*n_chunk;
+      const int64_t n_end = std::min(N, n_start+n_chunk);
 
 #pragma omp master
       {
         local_ptrs.resize(num_threads);
       }
+
 #pragma omp barrier
       local_ptrs[thread_id].resize(N,0);
 
@@ -378,7 +383,7 @@ CSRMatrix COOToCSR(COOMatrix coo) {
 #pragma omp barrier
 
       // compute prefixsum in parallel
-      constexpr const int cache_line = sizeof(IdType) / 64;
+      constexpr const int cache_line = 64/ sizeof(IdType);
       std::array<IdType, cache_line> line;
       for (int64_t i = n_start; i < n_end; i+=cache_line) {
         // use 1d cache blocking
@@ -386,9 +391,11 @@ CSRMatrix COOToCSR(COOMatrix coo) {
         for (int j = 0; j < num_threads; ++j) {
 #pragma unroll
           for (int k = 0; k < cache_line; ++k) {
-            const IdType tmp = line[k];
-            line[k] += local_ptrs[j][i+k];
-            local_ptrs[j][i+k] = tmp;
+            if (i+k  < n_end) {
+              const IdType tmp = line[k];
+              line[k] += local_ptrs[j][i+k];
+              local_ptrs[j][i+k] = tmp;
+            }
           }
         }
 
@@ -399,17 +406,23 @@ CSRMatrix COOToCSR(COOMatrix coo) {
           }
         }
       }
+
+#pragma omp barrier
+      #pragma omp master
+      {
+        for (int64_t i = 0; i < N; ++i) {
+          Bp[i+1] += Bp[i];
+        }
+        CHECK_EQ(Bp[N], NNZ);
+      }
 #pragma omp barrier
 
       for (int64_t i = nz_start; i < nz_end; ++i) {
         const IdType r = row_data[i];
-        const int64_t index = Bp[r] + local_ptrs[thread_id][r];
+        const int64_t index = Bp[r] + local_ptrs[thread_id][r]++;
         Bi[index] = col_data[i];
         Bx[index] = data ? data[i] : i;
       }
-
-      // free memory
-      local_ptrs[thread_id] = std::vector<int64_t>();
     }
   }
 

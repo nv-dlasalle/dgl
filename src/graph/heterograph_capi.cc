@@ -605,13 +605,13 @@ DGL_REGISTER_GLOBAL("heterograph_index._CAPI_DGLHeteroCreateFormat")
 .set_body([] (DGLArgs args, DGLRetValue* rv) {
     HeteroGraphRef hg = args[0];
     dgl_format_code_t code = hg->GetRelationGraph(0)->GetAllowedFormats();
-#if !defined(DGL_USE_CUDA)
-#pragma omp parallel for
-#endif
     for (int64_t etype = 0; etype < hg->NumEdgeTypes(); ++etype) {
       auto bg = std::dynamic_pointer_cast<UnitGraph>(hg->GetRelationGraph(etype));
-      for (auto format : CodeToSparseFormats(code))
+      for (auto format : CodeToSparseFormats(code)) {
+        std::cout << "Creating " << (int)format << "..." << std::endl;
         bg->GetFormat(format);
+        std::cout << "Created " << (int)format << "." << std::endl;
+      }
     }
 });
 
