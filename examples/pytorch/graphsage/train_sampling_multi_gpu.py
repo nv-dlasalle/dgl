@@ -57,9 +57,8 @@ class PrefetchingIterator:
             next_fetch = None
             try:
                 input_nodes, seeds, next_blocks = self.get_next()
-                next_blocks = [block.to(self.dev_id_) for block in next_blocks]
-                next_inputs, next_labels = load_subtensor_future(
-                    self.g_, self.g_.ndata['labels'], seeds,
+                next_inputs, next_labels, next_blocks = load_subtensor_future(
+                    self.g_, next_blocks, self.g_.ndata['labels'], seeds,
                     input_nodes,  self.dev_id_, self.async_)
                 next_fetch = (next_inputs, next_labels, next_blocks)
             except StopIteration:
@@ -211,7 +210,7 @@ def load_subtensor(g, labels, seeds, input_nodes, dev_id):
     return batch_inputs, batch_labels
 
 
-def load_subtensor_future(g, labels, seeds, input_nodes, dev_id, transfer):
+def load_subtensor_future(g, blocks, labels, seeds, input_nodes, dev_id, transfer):
     """
     Copys features and labels of a set of nodes onto GPU.
     """
@@ -222,9 +221,10 @@ def load_subtensor_future(g, labels, seeds, input_nodes, dev_id, transfer):
     nvtx.range_push("batch_inputs_to_gpu_async")
     batch_inputs_cpu = th.empty((input_nodes.shape[0], g.ndata['features'].shape[1]), pin_memory=True)
     th.index_select(g.ndata['features'],0, input_nodes, out=batch_inputs_cpu)
+    batch_blocks = [block.to(dev_id, non_blocking=True) for block in blocks]
     batch_inputs = transfer.async_copy(batch_inputs_cpu, dev_id)
     nvtx.range_pop()
-    return batch_inputs, batch_labels
+    return batch_inputs, batch_labels, batch_blocks
 
 #### Entry point
 
@@ -287,6 +287,8 @@ def run(proc_id, n_gpus, args, devices, data):
     # Training loop
     avg = 0
     iter_tput = []
+    fwd_tput = []
+    bwd_tput = []
     for epoch in range(args.num_epochs):
         tic = time.time()
 
@@ -302,6 +304,8 @@ def run(proc_id, n_gpus, args, devices, data):
             nvtx.range_push("model.forward")
             batch_pred = model(blocks, batch_inputs)
             nvtx.range_pop()
+
+            toc_step = time.time()
 
             nvtx.range_push("loss_fcn")
             loss = loss_fcn(batch_pred, batch_labels)
@@ -324,13 +328,15 @@ def run(proc_id, n_gpus, args, devices, data):
             nvtx.range_push("reporting.iter_tput")
             if proc_id == 0:
                 iter_tput.append(count * n_gpus / (time.time() - tic_step))
+                fwd_tput.append(toc_step-tic_step)
+                bwd_tput.append(time.time()-toc_step)
             nvtx.range_pop()
 
             nvtx.range_push("reporting.step")
             if step % args.log_every == 0 and proc_id == 0:
                 acc = compute_acc(batch_pred, batch_labels)
-                print('Epoch {:05d} | Step {:05d} | Loss {:.4f} | Train Acc {:.4f} | Speed (samples/sec) {:.4f} | GPU {:.1f} MB'.format(
-                    epoch, step, loss.item(), acc.item(), np.mean(iter_tput[3:]), th.cuda.max_memory_allocated() / 1000000))
+                print('Epoch {:05d} | Step {:05d} | Loss {:.4f} | Train Acc {:.4f} | Speed (samples/sec) {:.4f} | FWD: {:.4f}s | BWD {:.4f}s | GPU {:.1f} MB'.format(
+                    epoch, step, loss.item(), acc.item(), np.mean(iter_tput[3:]), np.mean(fwd_tput[3:]),np.mean(bwd_tput[3:]), th.cuda.max_memory_allocated() / 1000000))
             nvtx.range_pop()
 
         nvtx.range_push("sync")
@@ -406,9 +412,11 @@ if __name__ == '__main__':
     # Create csr/coo/csc formats before launching training processes with multi-gpu.
     # This avoids creating certain formats in each sub-process, which saves momory and CPU.
     print("Creating formats...")
+    formats_start = time.time()
     train_g.create_formats_()
     val_g.create_formats_()
     test_g.create_formats_()
+    print("Creating formats took {:.05f}s".format(time.time()-formats_start))
     # Pack data
     data = in_feats, n_classes, train_g, val_g, test_g
 
