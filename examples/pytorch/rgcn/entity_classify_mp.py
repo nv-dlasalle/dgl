@@ -341,7 +341,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
     sampler = NeighborSampler(g, target_idx, fanouts)
 
     loader = PrefetchingNodeDataLoader(
-        dev_id,
+        devices[proc_id],
         g,
         node_feats,
         labels,
@@ -379,7 +379,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         backend = 'nccl'
 
         # using sparse embedding or usig mix_cpu_gpu model (embedding model can not be stored in GPU)
-        if args.sparse_embedding or args.mix_cpu_gpu or dev_id < 0:
+        if dev_id < 0:
             backend = 'gloo'
         th.distributed.init_process_group(backend=backend,
                                           init_method=dist_init_method,
@@ -426,12 +426,6 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             embed_layer.cuda(dev_id)
 
     if n_gpus > 1:
-        if args.mix_cpu_gpu or dev_id < 0:
-            embed_layer = DistributedDataParallel(embed_layer, device_ids=None, output_device=None)
-        else:
-            embed_layer.cuda(dev_id)
-            embed_layer = DistributedDataParallel(embed_layer, device_ids=[dev_id], output_device=dev_id)
-
         if dev_id < 0:
             feat_layer = DistributedDataParallel(feat_layer, device_ids=None, output_device=None)
             model = DistributedDataParallel(model, device_ids=None, output_device=None)
@@ -443,21 +437,13 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             model = DistributedDataParallel(model, device_ids=[dev_id], output_device=dev_id)
 
     # optimizer
-    if args.sparse_embedding:
-        dense_params = list(model.parameters())
-        if args.node_feats:
-            if  n_gpus > 1:
-                dense_params += list(feat_layer.module.embeds.parameters())
-            else:
-                dense_params += list(feat_layer.embeds.parameters())
-        optimizer = th.optim.Adam(dense_params, lr=args.lr, weight_decay=args.l2norm)
+    dense_params = list(model.parameters())
+    if args.node_feats:
         if  n_gpus > 1:
-            emb_optimizer = FastSparseAdam(list(embed_layer.module.node_embeds.parameters()), lr=args.lr)
+            dense_params += list(feat_layer.module.embeds.parameters())
         else:
-            emb_optimizer = FastSparseAdam(list(embed_layer.node_embeds.parameters()), lr=args.lr)
-    else:
-        all_params = list(model.parameters()) + list(embed_layer.parameters())
-        optimizer = th.optim.Adam(all_params, lr=args.lr, weight_decay=args.l2norm)
+            dense_params += list(feat_layer.embeds.parameters())
+    optimizer = th.optim.Adam(dense_params, lr=args.lr, weight_decay=args.l2norm)
 
     # training loop
     print("start training...")
@@ -466,7 +452,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
 
     for epoch in range(args.n_epochs):
         model.train()
-        embed_layer.train()
+        feat_layer.train()
 
         loss = []
         tic = time.time()
@@ -474,15 +460,8 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             blocks_gpu, features_gpu, loc_cpu, node_ids_cpu, labels = sample_data
             t0 = time.time()
 
-            nvtx.range_push("embed_layer")
-            feats = embed_layer(node_ids_cpu,
-                                blocks_gpu[0].srcdata[dgl.NTYPE],
-                                node_feats,
-                                loc_cpu)
-            nvtx.range_pop()
-
-
             tmp_feats = feat_layer(features_gpu)
+            feats = th.empty(node_ids_cpu.shape[0], args.n_hidden, device=devices[proc_id])
             for ntype in range(num_of_ntype):
                 if node_feats[ntype] is not None:
                     loc_gpu = loc_cpu[ntype].to(devices[proc_id], non_blocking=True)
@@ -499,8 +478,6 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
 
             nvtx.range_push("zero_grad")
             optimizer.zero_grad()
-            if args.sparse_embedding:
-                emb_optimizer.zero_grad()
             nvtx.range_pop()
 
             nvtx.range_push("loss.backward")
@@ -511,10 +488,6 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             optimizer.step()
             nvtx.range_pop()
 
-            nvtx.range_push("emb_optimizer.step")
-            if args.sparse_embedding:
-                emb_optimizer.step()
-            nvtx.range_pop()
             t2 = time.time()
 
             forward_time.append(t1 - t0)
@@ -523,6 +496,10 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             if i % 20 == 0 and proc_id == 0:
                 print("Step: {:05d}/{:05d}:{:05d} | Train Loss: {:.4f}".
                     format(i, len(loader), epoch, loss.item()))
+
+            # delete me
+            if i == 5:
+                break
 
 
         toc = time.time()
