@@ -75,7 +75,7 @@ class PrefetchingIterator:
                     block.edata['norm']
 
                 for ntype in range(self.num_of_ntype_):
-                    loc[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
+                    loc[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().pin_memory().squeeze(-1)
                     if self.feats_[ntype] is not None:
 
 
@@ -108,7 +108,7 @@ class PrefetchingIterator:
 
 
                 for ntype in range(self.num_of_ntype_):
-                    next_loc[ntype] = (next_blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
+                    next_loc[ntype] = (next_blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().pin_memory().squeeze(-1)
                     if self.feats_[ntype] is not None:
 
 
