@@ -125,7 +125,7 @@ class RelGraphEmbedLayer(nn.Module):
         self.node_embeds = th.nn.Embedding(node_tids.shape[0], self.embed_size, sparse=self.sparse_emb)
         nn.init.uniform_(self.node_embeds.weight, -1.0, 1.0)
 
-    def forward(self, node_ids, node_tids, type_ids, features, loc_cpu):
+    def forward(self, node_ids, node_tids, features, loc_cpu):
         """Forward computation
         Parameters
         ----------
@@ -146,6 +146,7 @@ class RelGraphEmbedLayer(nn.Module):
         nvtx.range_push("node_ids_to_gpu")
         tsd_ids = node_ids.to(self.node_embeds.weight.device, non_blocking=True)
         nvtx.range_pop()
+
         nvtx.range_push("alloc_empty_embds")
         embeds = th.empty(node_ids.shape[0], self.embed_size, device=self.dev_id)
         nvtx.range_pop()
@@ -154,10 +155,10 @@ class RelGraphEmbedLayer(nn.Module):
             if features[ntype] is None:
                 nvtx.range_push("generate_loc")
                 loc = loc_cpu[ntype] 
-                loc_gpu = loc.to(self.dev_id, non_blocking=True)
+                loc_gpu = loc.pin_memory().to(self.dev_id, non_blocking=True)
                 nvtx.range_pop()
                 nvtx.range_push("embed_without_features")
-                embeds[loc_gpu] = self.node_embeds(tsd_ids[loc]).to(self.dev_id, non_blocking=True)
+                embeds[loc_gpu] = self.node_embeds(tsd_ids[loc]).pin_memory().to(self.dev_id, non_blocking=True)
                 nvtx.range_pop()
 
         return embeds

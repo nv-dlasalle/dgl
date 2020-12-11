@@ -21,6 +21,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 import dgl
 from dgl import DGLGraph
+from dgl.dataloading import AsyncTransferer
 from functools import partial
 
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
@@ -31,6 +32,142 @@ from utils import thread_wrapped_func
 import tqdm 
 
 from ogb.nodeproppred import DglNodePropPredDataset
+
+class PrefetchingIterator:
+    def __init__(self, i, dev_id, g, feats, labels, num_of_ntype):
+        self.iter_ = i
+        self.dev_id_ = dev_id
+        self.g_ = g
+        self.feats_ = feats
+        self.labels_ = labels
+        self.num_of_ntype_ = num_of_ntype
+        self.async_ = AsyncTransferer(dev_id)
+        self.fetched_ = None
+        self.multilabel_ = multilabel = len(self.labels_.shape) > 1
+
+    def get_next(self):
+        ret = None
+        try:
+            nvtx.range_push("NodeDataLoader.next()")
+            ret = next(self.iter_)
+        finally:
+            nvtx.range_pop()
+        return ret
+            
+
+    def __next__(self):
+        if self.fetched_ is None:
+            try:
+                nvtx.range_push("__next__.no_prefetch")
+                # directly load everything
+                seeds, blocks = self.get_next()
+
+                labels = self.labels_[seeds].to(self.dev_id_, non_blocking=True)
+                labels = labels.float() if self.multilabel_ else labels.long()
+                loc = [None for i in range(self.num_of_ntype_)]
+                features = [None for i in range(self.num_of_ntype_)]
+
+                node_ids_cpu = blocks[0].srcdata[dgl.NID] 
+                blocks_gpu = [block.to(self.dev_id_, non_blocking=True) for block in blocks]
+                # pull in block data too
+                for block in blocks_gpu:
+                    block.edata['etype']
+                    block.edata['norm']
+
+                for ntype in range(self.num_of_ntype_):
+                    loc[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
+                    if self.feats_[ntype] is not None:
+
+
+                        feats_cpu = th.empty((loc[ntype].shape[0], self.feats_[ntype].shape[1]), pin_memory=True)
+                        th.index_select(self.feats_[ntype], 0,
+                            blocks[0].srcdata['type_id'][loc[ntype]],
+                            out=feats_cpu)
+                        features[ntype] = feats_cpu.to(self.dev_id_, non_blocking=True)
+            finally:
+                nvtx.range_pop()
+
+        if self.dev_id_ != 'cpu':
+            nvtx.range_push("prefetch")
+            # initiate next fetch
+            next_fetch = None
+            try:
+                next_seeds, next_blocks = self.get_next()
+
+                next_labels = self.labels_[next_seeds].to(self.dev_id_, non_blocking=True)
+                next_labels = next_labels.float() if self.multilabel_ else next_labels.long()
+                next_loc = [None for i in range(self.num_of_ntype_)]
+                next_features = [None for i in range(self.num_of_ntype_)]
+                next_node_ids_cpu = next_blocks[0].srcdata[dgl.NID] 
+
+                next_blocks_gpu = [block.to(self.dev_id_, non_blocking=True) for block in next_blocks]
+                # pull in block data too
+                for block in next_blocks_gpu:
+                    block.edata['etype']
+                    block.edata['norm']
+
+
+                for ntype in range(self.num_of_ntype_):
+                    next_loc[ntype] = (next_blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
+                    if self.feats_[ntype] is not None:
+
+
+                        next_feats_cpu = th.empty((next_loc[ntype].shape[0], self.feats_[ntype].shape[1]), pin_memory=True)
+                        th.index_select(self.feats_[ntype], 0,
+                            next_blocks[0].srcdata['type_id'][next_loc[ntype]],
+                            out=next_feats_cpu)
+
+                        next_features[ntype] = self.async_.async_copy(next_feats_cpu, self.dev_id_)
+                
+                next_fetch = (next_blocks_gpu, next_features, next_loc,
+                    next_node_ids_cpu, next_labels)
+            except StopIteration:
+                # nothing to fetch
+                pass
+
+            if self.fetched_:
+                # grap futures
+                blocks_gpu, features_future, loc, node_ids_cpu, labels = self.fetched_
+                self.fetched_ = None
+                features = [None for f in features_future]
+                for i in range(len(features)):
+                    f = features_future[i]
+                    if f is not None:
+                        features[i] = f.wait()
+            self.fetched_ = next_fetch
+            nvtx.range_pop()
+
+        return (blocks_gpu, features, loc, node_ids_cpu, labels)
+        
+
+class PrefetchingNodeDataLoader:
+    def __init__(self, dev_id, g, feats, labels, num_of_ntype, dataset, sampler, **kwargs):
+        self.dev_id_ = dev_id
+        self.g_ = g
+        self.feats_ = feats
+        self.labels_ = labels
+        self.num_of_ntype_ = num_of_ntype
+        self.dataloader_ = DataLoader(
+            dataset=dataset,
+            collate_fn=sampler.sample_blocks,
+            **kwargs)
+
+    def __iter__(self):
+        """Return the iterator of the data loader."""
+        nvtx.range_push("create_node_iterator")
+        it = self.dataloader_.__iter__()
+        nvtx.range_pop()
+        nvtx.range_push("create_prefetching_iterator")
+        ret = PrefetchingIterator(it, self.dev_id_, self.g_, self.feats_,
+            self.labels_, self.num_of_ntype_)
+        nvtx.range_pop()
+        return ret
+
+    def __len__(self):
+        """Return the number of batches of the data loader."""
+        return len(self.dataloader_)
+
+
 
 class EntityClassify(nn.Module):
     """ Entity classification class for RGCN
@@ -202,28 +339,38 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
     fanouts = [int(fanout) for fanout in args.fanout.split(',')]
     node_tids = g.ndata[dgl.NTYPE]
     sampler = NeighborSampler(g, target_idx, fanouts)
-    loader = DataLoader(dataset=train_idx.numpy(),
-                        batch_size=args.batch_size,
-                        collate_fn=sampler.sample_blocks,
-                        shuffle=True,
-                        num_workers=args.num_workers,
-                        persistent_workers=True)
+
+    loader = PrefetchingNodeDataLoader(
+        dev_id,
+        g,
+        node_feats,
+        labels,
+        num_of_ntype,
+        dataset=train_idx,
+        sampler=sampler,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=False,
+        num_workers=args.num_workers,
+        persistent_workers=True)
+
+
 
     # validation sampler
-    val_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)
-    val_loader = DataLoader(dataset=val_idx.numpy(),
-                            batch_size=args.eval_batch_size,
-                            collate_fn=val_sampler.sample_blocks,
-                            shuffle=False,
-                            num_workers=args.num_workers)
-
-    # validation sampler
-    test_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)
-    test_loader = DataLoader(dataset=test_idx.numpy(),
-                             batch_size=args.eval_batch_size,
-                             collate_fn=test_sampler.sample_blocks,
-                             shuffle=False,
-                             num_workers=args.num_workers)
+#    val_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)
+#    val_loader = DataLoader(dataset=val_idx.numpy(),
+#                            batch_size=args.eval_batch_size,
+#                            collate_fn=val_sampler.sample_blocks,
+#                            shuffle=False,
+#                            num_workers=args.num_workers)
+#
+#    # validation sampler
+#    test_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)
+#    test_loader = DataLoader(dataset=test_idx.numpy(),
+#                             batch_size=args.eval_batch_size,
+#                             collate_fn=test_sampler.sample_blocks,
+#                             shuffle=False,
+#                             num_workers=args.num_workers)
 
     if n_gpus > 1:
         dist_init_method = 'tcp://{master_ip}:{master_port}'.format(
@@ -324,28 +471,12 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         loss = []
         tic = time.time()
         for i, sample_data in enumerate(loader):
-            seeds, blocks = sample_data
+            blocks_gpu, features_gpu, loc_cpu, node_ids_cpu, labels = sample_data
             t0 = time.time()
 
-            blocks_gpu = [block.to(devices[proc_id], non_blocking=True) for block in blocks]
-
-            loc_cpu = [None for i in range(num_of_ntype)]
-            for ntype in range(num_of_ntype):
-                loc_cpu[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().squeeze(-1)
-
-            nvtx.range_push("features_to_gpu")
-            features_gpu = [None for i in range(num_of_ntype)]
-            for ntype in range(num_of_ntype):
-                if node_feats[ntype] is not None:
-                    features_cpu = th.empty((loc_cpu[ntype].shape[0], node_feats[ntype].shape[1]), pin_memory=True)
-                    th.index_select(node_feats[ntype], 0, blocks[0].srcdata['type_id'][loc_cpu[ntype]], out=features_cpu)
-                    features_gpu[ntype] = features_cpu.to(devices[proc_id], non_blocking=True)
-            nvtx.range_pop()
-
             nvtx.range_push("embed_layer")
-            feats = embed_layer(blocks[0].srcdata[dgl.NID],
-                                blocks[0].srcdata[dgl.NTYPE],
-                                blocks[0].srcdata['type_id'],
+            feats = embed_layer(node_ids_cpu,
+                                blocks_gpu[0].srcdata[dgl.NTYPE],
                                 node_feats,
                                 loc_cpu)
             nvtx.range_pop()
@@ -362,9 +493,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             nvtx.range_pop()
 
             nvtx.range_push("F.cross_entropy")
-            label = labels[seeds]
-            label = label.float() if multilabel else label.long()
-            loss = loss_func(logits, label)
+            loss = loss_func(logits, labels)
             nvtx.range_pop()
             t1 = time.time()
 
