@@ -2,6 +2,7 @@
 # pylint: disable= no-member, arguments-differ, invalid-name
 import torch as th
 from torch import nn
+from torch.cuda import nvtx
 
 from .... import function as fn
 from .. import utils
@@ -202,12 +203,20 @@ class RelGraphConv(nn.Module):
             msg = th.empty((edges.src['h'].shape[0], self.out_feat),
                            device=edges.src['h'].device)
             for etype in range(self.num_rels):
+                nvtx.range_push("basis_loc_{}".format(etype))
                 loc = (edges.data['type'] == etype).nonzero()
+                nvtx.range_pop()
                 if loc.shape[0] > 0:
                     w = weight[etype]
+                    nvtx.range_push("selecting_src")
                     src = edges.src['h'][loc]
+                    nvtx.range_pop()
+                    nvtx.range_push("selecting_src")
                     sub_msg = th.matmul(src, w)
+                    nvtx.range_pop()
+                    nvtx.range_push("assigning_msg")
                     msg[loc] = sub_msg
+                    nvtx.range_pop()
         else:
             # put W_r into edges then do msg @ W_r
             msg = utils.bmm_maybe_select(edges.src['h'], weight, edges.data['type'])
