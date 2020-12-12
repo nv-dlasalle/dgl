@@ -77,8 +77,6 @@ class PrefetchingIterator:
                 for ntype in range(self.num_of_ntype_):
                     loc[ntype] = (blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().pin_memory().squeeze(-1)
                     if self.feats_[ntype] is not None:
-
-
                         feats_cpu = th.empty((loc[ntype].shape[0], self.feats_[ntype].shape[1]), pin_memory=True)
                         th.index_select(self.feats_[ntype], 0,
                             blocks[0].srcdata['type_id'][loc[ntype]],
@@ -106,12 +104,15 @@ class PrefetchingIterator:
                     block.edata['etype']
                     block.edata['norm']
 
-
                 for ntype in range(self.num_of_ntype_):
                     next_loc[ntype] = (next_blocks[0].srcdata[dgl.NTYPE] == ntype).nonzero().pin_memory().squeeze(-1)
+
+                desc_ntype = [*range(self.num_of_ntype_)]
+                desc_ntype.sort(reverse=True, key=lambda i:
+                    self.feats_[i].shape[1]*next_loc[i].shape[0] if self.feats_[i] is not None else 0
+                )
+                for ntype in desc_ntype:
                     if self.feats_[ntype] is not None:
-
-
                         next_feats_cpu = th.empty((next_loc[ntype].shape[0], self.feats_[ntype].shape[1]), pin_memory=True)
                         th.index_select(self.feats_[ntype], 0,
                             next_blocks[0].srcdata['type_id'][next_loc[ntype]],
