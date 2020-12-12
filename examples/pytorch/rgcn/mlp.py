@@ -92,16 +92,29 @@ def config():
     return args
 
 
-def train(net, dataloader, features, lr, num_epochs):
+def train(net, dataloader, val_dl, features, labels, lr, num_epochs):
     opt = th.optim.Adam(net.parameters(), lr=lr)
 
+    ps = labels.sum(0).float()
+    pw = (labels.shape[0] - ps) / ps
+
     for epoch in range(num_epochs):
+        losses = []
         with tqdm(dataloader) as tq:
             for batch in tq:
                 opt.zero_grad()
                 x = features[batch]
                 y_hat = net(x)
+                y = labels[batch].float()
                 loss = F.binary_cross_entropy_with_logits(y_hat, y, pos_weight=pw)
+                loss.backward()
+                opt.step()
+                losses.append(loss.item())
+        print('epoch {} | loss {}'.format(epoch, np.mean(losses)))
+        if epoch % 5 == 0 and epoch > 0:
+            evaluate(net, val_dl, features, labels)
+    if num_epochs % 5 != 0:
+        evaluate(net, val_dl, features, labels)
 
 
 def baseline(dataloader, paper_labels):
@@ -114,9 +127,26 @@ def baseline(dataloader, paper_labels):
           skm.roc_auc_score(ys, np.random.randn(*ys.shape)),
           skm.average_precision_score(ys, np.random.randn(*ys.shape)))
 
+def evaluate(net, dataloader, features, labels):
+    with tqdm(dataloader) as tq, th.no_grad():
+        y_hats = []
+        ys = []
+        for batch in tq:
+            x = features[batch]
+            y = labels[batch]
+            y_hat = net(x)
+            y_hats.append(y_hat)
+            ys.append(y)
+        ys = th.cat(ys, 0).cpu().numpy()
+        y_hats = th.cat(y_hats, 0).cpu().numpy()
+        print('AUC:', skm.roc_auc_score(ys, y_hats))
+        print('APS', skm.average_precision_score(ys, y_hats))
+
+
 def main(args):
     graph, node_feats, paper_labels, train_idx, val_idx, test_idx, category, \
         num_classes = load_oag(args.dataset)
+    paper_feats = node_feats[graph.get_ntype_id('paper')]
 
     train_dl = th.utils.data.DataLoader(train_idx, batch_size=args.batch_size, shuffle=True, drop_last=False)
     val_dl = th.utils.data.DataLoader(val_idx, batch_size=args.batch_size, shuffle=True, drop_last=False)
@@ -128,7 +158,14 @@ def main(args):
     print("Test set")
     baseline(test_dl, paper_labels)
 
-    #net = MLP(node_feats.shape[1], args.n_hidden, num_classes)
+    net = MLP(paper_feats.shape[1], args.n_hidden, num_classes)
+    net = net.cuda()
+
+    paper_labels = paper_labels.cuda()
+    paper_feats = paper_feats.cuda()
+
+    train(net, train_dl, val_dl, paper_feats, paper_labels, args.lr, args.n_epochs)
+    evaluate(net, test_dl, paper_feats, paper_labels)
 
 if __name__ == '__main__':
     args = config()
