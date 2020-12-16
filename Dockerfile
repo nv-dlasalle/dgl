@@ -35,6 +35,12 @@ ADD ./examples/pytorch/rgcn/utils.py ./examples/pytorch/rgcn/utils.py
 ADD ./benchmark_rgcn.sh ./
 
 ADD ./examples/pytorch/graphsage/load_graph.py ./examples/pytorch/graphsage/load_graph.py
+ADD ./examples/pytorch/graphsage/utils.py ./examples/pytorch/graphsage/utils.py
 ADD ./examples/pytorch/graphsage/train_sampling_multi_gpu.py ./examples/pytorch/graphsage/train_sampling_multi_gpu.py
 ADD ./benchmark_graphsage.sh ./
+
+# preprate motd
+
+RUN echo '[ ! -z "${TERM}" -a -r /etc/motd ] && cat /etc/motd' >> /etc/bash.bashrc
+ADD docker.motd /etc/motd
 

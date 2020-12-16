@@ -23,6 +23,8 @@ import dgl
 from dgl import DGLGraph
 from dgl.dataloading import AsyncTransferer
 from functools import partial
+import os
+import subprocess
 
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
 from model import RelGraphEmbedLayer, RelFeatLayer
@@ -557,7 +559,13 @@ def load_mag(args):
     return hg, node_feats, labels, train_idx, val_idx, test_idx, category, num_classes
 
 def load_oag(args):
-    dataset = dgl.load_graphs(args.dataset)[0]
+    dataset_file = args.dataset
+    if not os.path.exists(dataset_file):
+        dataset_url = "https://s3.us-west-2.amazonaws.com/dgl-data/dataset/OAG/" + dataset_file
+        print("Fetching '{}'".format(dataset_url))
+        subprocess.run(["wget", dataset_url]).check_returncode()
+
+    dataset = dgl.load_graphs(dataset_file)[0]
     hg = dataset[0]
 
     # Construct node features.
