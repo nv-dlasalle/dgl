@@ -498,11 +498,6 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
                 print("Step: {:05d}/{:05d}:{:05d} | Train Loss: {:.4f}".
                     format(i, len(loader), epoch, loss.item()))
 
-            # delete me
-            if i == 5:
-                break
-
-
         toc = time.time()
         if proc_id == 0:
             print("Epoch time: {:.05f}".format(toc-tic))
