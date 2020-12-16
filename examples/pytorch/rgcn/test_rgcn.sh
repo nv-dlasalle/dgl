@@ -2,7 +2,7 @@
 
 GPUS="${1}"
 
-NSYS="nsys profile -o /tmp/rgcn_1gpu -f true --trace=nvtx,cuda"
+#NSYS="nsys profile -o /tmp/rgcn_1gpu -f true --trace=nvtx,cuda"
 
 DGL_USE_CUDA_MEMORY_POOL=1 OMP_NUM_THREADS=6 ${NSYS} python3 entity_classify_mp.py --gpu="${GPUS}" \
   -d oag_min.dgl \

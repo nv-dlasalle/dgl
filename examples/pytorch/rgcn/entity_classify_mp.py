@@ -601,6 +601,13 @@ def load_oag(args):
     paper_labels = paper_labels[:,label_filter]
     print('#labels:', paper_labels.shape[1])
 
+    print("Edge types:", len(hg.etypes))
+    for etype in hg.canonical_etypes:
+      print(etype)
+
+    print("Number of nodes:", hg.num_nodes())
+    print("Number of edges:", hg.num_edges())
+
     # Adjust training, validation and testing set to make sure all paper nodes
     # in these sets have labels.
     train_idx = train_idx[paper_labels[train_idx].sum(1) > 0]

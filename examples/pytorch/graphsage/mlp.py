@@ -69,6 +69,9 @@ def train(net, dataloader, val_dl, features, labels, lr, num_epochs):
 
 
 def compute_acc(labels, pred):
+#    skm.roc_auc_score(labels.cpu().numpy(), pred.cpu().numpy(),
+#          multi_class='ovo', labels=range(pred.shape[1])),
+#    skm.average_precision_score(labels.cpu().numpy(), pred.cpu().numpy()))
     return (th.argmax(pred, dim=1) == labels).float().sum() / labels.shape[0] 
 
 def baseline(dataloader, paper_labels, n_classes):
@@ -80,11 +83,6 @@ def baseline(dataloader, paper_labels, n_classes):
     y_hat = th.abs(th.randn((ys.shape[0], n_classes), device=th.device(0)))
     y_hat = y_hat / y_hat.sum(dim=1, keepdim=True)
     print('Random baseline:', compute_acc(ys, y_hat))
-    print("ys = {}".format(ys))
-    print('Random baseline:',
-          skm.roc_auc_score(ys.cpu().numpy(), y_hat.cpu().numpy(),
-              multi_class='ovo', labels=range(n_classes)),
-          skm.average_precision_score(ys.cpu().numpy(), y_hat.cpu().numpy()))
 
 def evaluate(net, dataloader, features, labels):
     with tqdm(dataloader) as tq, th.no_grad():
