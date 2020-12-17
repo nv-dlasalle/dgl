@@ -396,12 +396,11 @@ if __name__ == '__main__':
 
     # Create csr/coo/csc formats before launching training processes with multi-gpu.
     # This avoids creating certain formats in each sub-process, which saves momory and CPU.
-    print("Creating formats...")
     formats_start = time.time()
     train_g.create_formats_()
     val_g.create_formats_()
     test_g.create_formats_()
-    print("Creating formats took {:.05f}s".format(time.time()-formats_start))
+
     # Pack data
     data = in_feats, n_classes, train_g, val_g, test_g
 

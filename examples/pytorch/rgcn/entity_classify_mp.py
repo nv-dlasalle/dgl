@@ -315,14 +315,12 @@ class NeighborSampler:
             blocks.insert(0, block)
         return seeds, blocks
 
-def evaluate(model, feat_layer, eval_loader, node_feats):
+def evaluate(model, feat_layer, eval_loader, node_feats, device):
     model.eval()
     feat_layer.eval()
     eval_logits = []
     eval_seeds = []
 
-    device = feat_layer.dev_id
- 
     with th.no_grad():
         for sample_data in tqdm.tqdm(eval_loader):
             th.cuda.empty_cache()
@@ -529,7 +527,8 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
 
     # only process 0 will do the evaluation
     if (queue is not None) or (proc_id == 0):
-        test_logits, test_seeds = evaluate(model, feat_layer, test_loader, node_feats)
+        test_logits, test_seeds = evaluate(model, feat_layer, test_loader,
+            node_feats, devices[proc_id])
         if queue is not None:
             queue.put((test_logits, test_seeds))
 
