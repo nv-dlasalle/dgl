@@ -315,7 +315,7 @@ class NeighborSampler:
             blocks.insert(0, block)
         return seeds, blocks
 
-def evaluate(model, feat_layer, eval_loader, node_feats, device):
+def evaluate(model, feat_layer, eval_loader, node_feats, device, ndim):
     model.eval()
     feat_layer.eval()
     eval_logits = []
@@ -328,7 +328,7 @@ def evaluate(model, feat_layer, eval_loader, node_feats, device):
             blocks_gpu, features_gpu, loc_cpu, node_ids_cpu, labels, seeds = sample_data
 
             tmp_feats = feat_layer(features_gpu)
-            feats = th.empty(node_ids_cpu.shape[0], feat_layer.embed_size,
+            feats = th.empty(node_ids_cpu.shape[0], ndim,
                 device=device)
             for ntype in range(len(node_feats)):
                 if node_feats[ntype] is not None:
@@ -528,7 +528,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
     # only process 0 will do the evaluation
     if (queue is not None) or (proc_id == 0):
         test_logits, test_seeds = evaluate(model, feat_layer, test_loader,
-            node_feats, devices[proc_id])
+            node_feats, devices[proc_id], args.n_hidden)
         if queue is not None:
             queue.put((test_logits, test_seeds))
 
