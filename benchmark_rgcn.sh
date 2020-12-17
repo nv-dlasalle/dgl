@@ -2,7 +2,7 @@
 
 GPUS="${1}"
 NUM_EPOCHS=30
-DATASET="oag_min.dgl"
+DATASET="oag_max.dgl"
 
 pushd examples/pytorch/rgcn/
 

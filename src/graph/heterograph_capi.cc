@@ -608,9 +608,7 @@ DGL_REGISTER_GLOBAL("heterograph_index._CAPI_DGLHeteroCreateFormat")
     for (int64_t etype = 0; etype < hg->NumEdgeTypes(); ++etype) {
       auto bg = std::dynamic_pointer_cast<UnitGraph>(hg->GetRelationGraph(etype));
       for (auto format : CodeToSparseFormats(code)) {
-        std::cout << "Creating " << (int)format << "..." << std::endl;
         bg->GetFormat(format);
-        std::cout << "Created " << (int)format << "." << std::endl;
       }
     }
 });

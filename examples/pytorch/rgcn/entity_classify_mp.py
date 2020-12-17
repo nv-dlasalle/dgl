@@ -22,9 +22,11 @@ from torch.utils.data import DataLoader
 import dgl
 from dgl import DGLGraph
 from dgl.dataloading import AsyncTransferer
+import dgl.function as fn
 from functools import partial
 import os
 import subprocess
+import sklearn.metrics as skm
 
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
 from model import RelGraphEmbedLayer, RelFeatLayer
@@ -33,6 +35,15 @@ from utils import thread_wrapped_func
 import tqdm 
 
 from ogb.nodeproppred import DglNodePropPredDataset
+
+def print_eval(logits, labels):
+    multilabel = len(labels.shape) > 1
+    if multilabel:
+        print('AUC:', skm.roc_auc_score(labels.numpy(), logits.numpy()))
+        print('APS', skm.average_precision_score(labels.numpy(), logits.numpy()))
+    else:
+        val_acc = th.sum(logits.argmax(dim=1) == labels.cpu()).item() / len(labels)
+        print("Accuracy: {:.4f}".format(val_acc))
 
 class PrefetchingIterator:
     def __init__(self, i, dev_id, g, feats, labels, num_of_ntype):
@@ -122,14 +133,14 @@ class PrefetchingIterator:
                         next_features[ntype] = self.async_.async_copy(next_feats_cpu, self.dev_id_)
                 
                 next_fetch = (next_blocks_gpu, next_features, next_loc,
-                    next_node_ids_cpu, next_labels)
+                    next_node_ids_cpu, next_labels, next_seeds)
             except StopIteration:
                 # nothing to fetch
                 pass
 
             if self.fetched_:
                 # grap futures
-                blocks_gpu, features_future, loc, node_ids_cpu, labels = self.fetched_
+                blocks_gpu, features_future, loc, node_ids_cpu, labels, seeds = self.fetched_
                 self.fetched_ = None
                 features = [None for f in features_future]
                 for i in range(len(features)):
@@ -139,7 +150,7 @@ class PrefetchingIterator:
             self.fetched_ = next_fetch
             nvtx.range_pop()
 
-        return (blocks_gpu, features, loc, node_ids_cpu, labels)
+        return (blocks_gpu, features, loc, node_ids_cpu, labels, seeds)
         
 
 class PrefetchingNodeDataLoader:
@@ -304,21 +315,29 @@ class NeighborSampler:
             blocks.insert(0, block)
         return seeds, blocks
 
-def evaluate(model, embed_layer, feat_layer, eval_loader, node_feats):
+def evaluate(model, feat_layer, eval_loader, node_feats):
     model.eval()
-    embed_layer.eval()
+    feat_layer.eval()
     eval_logits = []
     eval_seeds = []
+
+    device = feat_layer.dev_id
  
     with th.no_grad():
         for sample_data in tqdm.tqdm(eval_loader):
             th.cuda.empty_cache()
-            seeds, blocks = sample_data
-            feats = embed_layer(blocks[0].srcdata[dgl.NID],
-                    blocks[0].srcdata[dgl.NTYPE],
-                    blocks[0].srcdata['type_id'],
-                    node_feats)
-            logits = model(blocks, feats)
+
+            blocks_gpu, features_gpu, loc_cpu, node_ids_cpu, labels, seeds = sample_data
+
+            tmp_feats = feat_layer(features_gpu)
+            feats = th.empty(node_ids_cpu.shape[0], feat_layer.embed_size,
+                device=device)
+            for ntype in range(len(node_feats)):
+                if node_feats[ntype] is not None:
+                    loc_gpu = loc_cpu[ntype].to(device, non_blocking=True)
+                    feats[loc_gpu] = tmp_feats[ntype]
+
+            logits = model(blocks_gpu, feats)
             eval_logits.append(logits.cpu().detach())
             eval_seeds.append(seeds.cpu().detach())
     eval_logits = th.cat(eval_logits)
@@ -359,20 +378,20 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
 
 
     # validation sampler
-#    val_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)
-#    val_loader = DataLoader(dataset=val_idx.numpy(),
-#                            batch_size=args.eval_batch_size,
-#                            collate_fn=val_sampler.sample_blocks,
-#                            shuffle=False,
-#                            num_workers=args.num_workers)
-#
-#    # validation sampler
-#    test_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)
-#    test_loader = DataLoader(dataset=test_idx.numpy(),
-#                             batch_size=args.eval_batch_size,
-#                             collate_fn=test_sampler.sample_blocks,
-#                             shuffle=False,
-#                             num_workers=args.num_workers)
+    test_sampler = NeighborSampler(g, target_idx, [None] * args.n_layers)
+    test_loader = PrefetchingNodeDataLoader(
+        devices[proc_id],
+        g,
+        node_feats,
+        labels,
+        num_of_ntype,
+        dataset=test_idx,
+        sampler=test_sampler,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=False,
+        num_workers=args.num_workers,
+        persistent_workers=True)
 
     if n_gpus > 1:
         dist_init_method = 'tcp://{master_ip}:{master_port}'.format(
@@ -459,7 +478,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
         loss = []
         tic = time.time()
         for i, sample_data in enumerate(loader):
-            blocks_gpu, features_gpu, loc_cpu, node_ids_cpu, labels = sample_data
+            blocks_gpu, features_gpu, loc_cpu, node_ids_cpu, batch_labels, seeds = sample_data
             t0 = time.time()
 
             tmp_feats = feat_layer(features_gpu)
@@ -474,7 +493,7 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
             nvtx.range_pop()
 
             nvtx.range_push("F.cross_entropy")
-            loss = loss_func(logits, labels)
+            loss = loss_func(logits, batch_labels)
             nvtx.range_pop()
             t1 = time.time()
 
@@ -507,6 +526,27 @@ def run(proc_id, n_gpus, args, devices, dataset, split, queue=None):
 
         if n_gpus > 1:
             th.distributed.barrier()
+
+    # only process 0 will do the evaluation
+    if (queue is not None) or (proc_id == 0):
+        test_logits, test_seeds = evaluate(model, feat_layer, test_loader, node_feats)
+        if queue is not None:
+            queue.put((test_logits, test_seeds))
+
+        # gather evaluation result from multiple processes
+        if proc_id == 0:
+            if queue is not None:
+                test_logits = []
+                test_seeds = []
+                for i in range(n_gpus):
+                    log = queue.get()
+                    test_l, test_s = log
+                    test_logits.append(test_l)
+                    test_seeds.append(test_s)
+                test_logits = th.cat(test_logits)
+                test_seeds = th.cat(test_seeds)
+            label = labels[test_seeds].cpu()
+            print_eval(test_logits, label)
 
     # sync for test
     if n_gpus > 1:
@@ -602,11 +642,6 @@ def load_oag(args):
     label_filter = th.logical_and(label_filter, paper_labels[test_idx].sum(0) > 100)
     paper_labels = paper_labels[:,label_filter]
     print('#labels:', paper_labels.shape[1])
-
-    print("Edge types:", len(hg.etypes))
-    for etype in hg.canonical_etypes:
-      print(etype)
-
     print("Number of nodes:", hg.num_nodes())
     print("Number of edges:", hg.num_edges())
 
