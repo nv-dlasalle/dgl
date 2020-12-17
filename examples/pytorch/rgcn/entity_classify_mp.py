@@ -28,7 +28,6 @@ import subprocess
 
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
 from model import RelGraphEmbedLayer, RelFeatLayer
-from sparse_optimizer import FastSparseAdam
 from dgl.nn import RelGraphConv
 from utils import thread_wrapped_func
 import tqdm 
