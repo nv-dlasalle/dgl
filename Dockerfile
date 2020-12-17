@@ -33,15 +33,21 @@ ENV LD_LIBRARY_PATH "${LD_LIBRARY_PATH}:/opt/conda/lib/python3.6/site-packages/t
 ADD ./examples/pytorch/rgcn/entity_classify_mp.py ./examples/pytorch/rgcn/entity_classify_mp.py
 ADD ./examples/pytorch/rgcn/model.py ./examples/pytorch/rgcn/model.py
 ADD ./examples/pytorch/rgcn/utils.py ./examples/pytorch/rgcn/utils.py
-ADD ./benchmark_rgcn.sh ./
 
 ADD ./examples/pytorch/graphsage/load_graph.py ./examples/pytorch/graphsage/load_graph.py
 ADD ./examples/pytorch/graphsage/utils.py ./examples/pytorch/graphsage/utils.py
 ADD ./examples/pytorch/graphsage/train_sampling_multi_gpu.py ./examples/pytorch/graphsage/train_sampling_multi_gpu.py
-ADD ./benchmark_graphsage.sh ./
 
 # preprate motd
 
 RUN echo '[ ! -z "${TERM}" -a -r /etc/motd ] && cat /etc/motd' >> /etc/bash.bashrc
 ADD docker.motd /etc/motd
 
+ADD ./benchmark_rgcn_oag_min_gpu.sh ./
+ADD ./benchmark_rgcn_oag_min_cpu.sh ./
+ADD ./benchmark_rgcn_oag_max_gpu.sh ./
+ADD ./benchmark_rgcn_oag_max_cpu.sh ./
+ADD ./benchmark_graphsage_ogbn-products_gpu.sh ./
+ADD ./benchmark_graphsage_ogbn-products_cpu.sh ./
+ADD ./benchmark_graphsage_ogbn-papers100M_gpu.sh ./
+ADD ./benchmark_graphsage_ogbn-papers100M_cpu.sh ./
