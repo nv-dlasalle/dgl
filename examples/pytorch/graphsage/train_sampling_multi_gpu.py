@@ -343,7 +343,7 @@ def run(proc_id, n_gpus, args, devices, data):
             print('Epoch Time(s): {:.4f}'.format(toc - tic))
 
     if proc_id == 0:
-        print('Avg epoch time: {}'.format(avg / epoch))
+        print('Avg epoch time: {}'.format(avg / args.num_epochs))
     if n_gpus > 1:
         th.distributed.barrier()
 
