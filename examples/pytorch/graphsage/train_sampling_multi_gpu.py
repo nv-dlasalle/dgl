@@ -294,7 +294,6 @@ def run(proc_id, n_gpus, args, devices, data):
 
         # Loop over the dataloader to sample the computation dependency graph as a list of
         # blocks.
-        nvtx.range_push("epoch_{}".format(epoch))
         for step, (blocks, batch_inputs, batch_labels) in enumerate(dataloader):
             tic_step = time.time()
 
@@ -325,52 +324,39 @@ def run(proc_id, n_gpus, args, devices, data):
 
             batch_inputs = None
 
-            nvtx.range_push("reporting.iter_tput")
             if proc_id == 0:
                 iter_tput.append(count * n_gpus / (time.time() - tic_step))
                 fwd_tput.append(toc_step-tic_step)
                 bwd_tput.append(time.time()-toc_step)
-            nvtx.range_pop()
 
-            nvtx.range_push("reporting.step")
             if step % args.log_every == 0 and proc_id == 0:
                 acc = compute_acc(batch_pred, batch_labels)
                 print('Epoch {:05d} | Step {:05d} | Loss {:.4f} | Train Acc {:.4f} | Speed (samples/sec) {:.4f} | FWD: {:.4f}s | BWD {:.4f}s | GPU {:.1f} MB'.format(
                     epoch, step, loss.item(), acc.item(), np.mean(iter_tput[3:]), np.mean(fwd_tput[3:]),np.mean(bwd_tput[3:]), th.cuda.max_memory_allocated() / 1000000))
-            nvtx.range_pop()
 
-        nvtx.range_push("sync")
         if n_gpus > 1:
             th.distributed.barrier()
-        nvtx.range_pop()
-        nvtx.range_pop()
 
-        nvtx.range_push("epoch_reporting")
         toc = time.time()
+        avg += toc - tic
         if proc_id == 0:
             print('Epoch Time(s): {:.4f}'.format(toc - tic))
-            if epoch >= 5:
-                avg += toc - tic
-            if epoch % args.eval_every == 0 and epoch != 0:
-                if n_gpus == 1:
-                    eval_acc = evaluate(
-                        model, val_g, val_g.ndata['features'], val_g.ndata['labels'], val_nid, args.batch_size, devices[0])
-                    test_acc = evaluate(
-                        model, test_g, test_g.ndata['features'], test_g.ndata['labels'], test_nid, args.batch_size, devices[0])
-                else:
-                    eval_acc = evaluate(
-                        model.module, val_g, val_g.ndata['features'], val_g.ndata['labels'], val_nid, args.batch_size, devices[0])
-                    test_acc = evaluate(
-                        model.module, test_g, test_g.ndata['features'], test_g.ndata['labels'], test_nid, args.batch_size, devices[0])
-                print('Eval Acc {:.4f}'.format(eval_acc))
-                print('Test Acc: {:.4f}'.format(test_acc))
 
-        nvtx.range_pop()
-
+    if proc_id == 0:
+        print('Avg epoch time: {}'.format(avg / epoch))
     if n_gpus > 1:
         th.distributed.barrier()
+
+
     if proc_id == 0:
-        print('Avg epoch time: {}'.format(avg / (epoch - 4)))
+        if n_gpus == 1:
+            test_acc = evaluate(
+                model, test_g, test_g.ndata['features'], test_g.ndata['labels'], test_nid, args.batch_size, devices[0])
+        else:
+            test_acc = evaluate(
+                model.module, test_g, test_g.ndata['features'], test_g.ndata['labels'], test_nid, args.batch_size, devices[0])
+        print('Test Acc: {:.4f}'.format(test_acc))
+
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser("multi-gpu training")
@@ -382,7 +368,6 @@ if __name__ == '__main__':
     argparser.add_argument('--fan-out', type=str, default='10,25')
     argparser.add_argument('--batch-size', type=int, default=1000)
     argparser.add_argument('--log-every', type=int, default=20)
-    argparser.add_argument('--eval-every', type=int, default=5)
     argparser.add_argument('--lr', type=float, default=0.003)
     argparser.add_argument('--dataset', type=str, default='ogbn-products')
     argparser.add_argument('--dropout', type=float, default=0.5)
