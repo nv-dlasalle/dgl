@@ -21,6 +21,7 @@ ADD src ./dgl/src
 ADD tests ./dgl/tests
 ADD third_party ./dgl/third_party
 ADD tools ./dgl/tools
+ADD LICENSE ./dgl/LICENSE
 
 WORKDIR /workspace/dgl/
 
