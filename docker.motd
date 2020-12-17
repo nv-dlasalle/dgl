@@ -6,8 +6,13 @@ only be used for evaluation purposes.
 
 To run the benchmarks on 8 GPUs:
 
-$ ./benchmark_rgcn_oag_max.sh 0,1,2,3,4,5,6,7
+$ ./benchmark_rgcn_oag_max_gpu.sh 0,1,2,3,4,5,6,7
+$ ./benchmark_graphsage_ogbn-products_gpu.sh 0,1,2,3,4,5,6,7
+$ ./benchmark_graphsage_ogbn-papers100M_gpu.sh 0,1,2,3,4,5,6,7
 
-$ ./benchmark_graphsage_ogbn_products.sh 0,1,2,3,4,5,6,7
+Similarly, to run the benchmarks on CPU (assumes 48 physical cores):
 
-$ ./benchmark_graphsage_ogbn_papers100m.sh 0,1,2,3,4,5,6,7
+$ ./benchmark_rgcn_oag_max_gpu.sh
+$ ./benchmark_graphsage_ogbn-products_gpu.sh
+$ ./benchmark_graphsage_ogbn-papers100M_gpu.sh
+
