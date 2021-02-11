@@ -16,6 +16,40 @@ using namespace cuda;
 namespace aten {
 namespace {
 
+template<typename DType>
+__global__ void _PadMatrix(
+  const DType * const in,
+  DType * const out_padded,
+  const int64_t columns,
+  const int64_t padded_columns)
+{
+  const int64_t offset = blockIdx.x*columns;
+  const int64_t padded_offset = blockIdx.x*padded_columns;
+
+  int idx = threadIdx.x;
+  while (idx < columns) {
+    out_padded[padded_offset+idx] = in[offset+idx];
+    idx += blockDim.x;
+  }
+}
+
+template<typename DType>
+__global__ void _UnpadMatrix(
+  const DType * const in_padded,
+  DType * const out,
+  const int64_t columns,
+  const int64_t padded_columns)
+{
+  const int64_t offset = blockIdx.x*columns;
+  const int64_t padded_offset = blockIdx.x*padded_columns;
+
+  int idx = threadIdx.x;
+  while (idx < columns) {
+    out[offset+idx] = in_padded[padded_offset+idx];
+    idx += blockDim.x;
+  }
+}
+
 /*! \brief Call cuBLAS geam API for transpose operation for float and double. */
 template <typename DType>
 cublasStatus_t Xgeam(cublasHandle_t handle, cublasOperation_t transa,
@@ -220,6 +254,24 @@ void CusparseCsrmm2(
     _Fill(valptr, nnz, static_cast<DType>(1.));
   }
 #if CUDART_VERSION >= 11000
+  // align matrix columns to 128 bytes for best SpMM performance
+  const int64_t multiple = 128 / sizeof(DType);
+  const int64_t up_n = multiple*((n+multiple-1) / multiple);
+
+  DType* B_in;
+  DType* C_out;
+
+  if (up_n != n) {
+    // pad B and C matrices to 128 bytes
+    B_in = static_cast<DType*>(device->AllocWorkspace(ctx, k * up_n * sizeof(DType)));
+    C_out = static_cast<DType*>(device->AllocWorkspace(ctx, m * up_n * sizeof(DType)));
+
+    _PadMatrix<<<up_n, 512>>>(B_data, B_in, n, up_n);
+  } else {
+    B_in = const_cast<DType*>(B_data);
+    C_out = C_data;
+  }
+
   cusparseSpMatDescr_t matA;
   cusparseDnMatDescr_t matB, matC;
   constexpr auto dtype = cuda_dtype<DType>::value;
@@ -232,11 +284,11 @@ void CusparseCsrmm2(
       idtype, idtype,
       CUSPARSE_INDEX_BASE_ZERO, dtype));
   CUSPARSE_CALL(cusparseCreateDnMat(&matB,
-      k, n, n,
-      const_cast<DType*>(B_data), dtype, CUSPARSE_ORDER_ROW));
+      k, n, up_n,
+      B_in, dtype, CUSPARSE_ORDER_ROW));
   CUSPARSE_CALL(cusparseCreateDnMat(&matC,
-      m, n, n,
-      C_data, dtype, CUSPARSE_ORDER_ROW));
+      m, n, up_n,
+      C_out, dtype, CUSPARSE_ORDER_ROW));
 
   auto transA = CUSPARSE_OPERATION_NON_TRANSPOSE;
   auto transB = CUSPARSE_OPERATION_NON_TRANSPOSE;
@@ -253,6 +305,16 @@ void CusparseCsrmm2(
       dtype, CUSPARSE_SPMM_CSR_ALG2,
       workspace));
   device->FreeWorkspace(ctx, workspace);
+
+  if (B_in != B_data) {
+    device->FreeWorkspace(ctx, B_in);
+  }
+
+  if (C_out != C_data) {
+    // copy data back to unpadded matrices and free workspace
+    _UnpadMatrix<<<m, 512>>>(C_out, C_data, n, up_n);
+    device->FreeWorkspace(ctx, C_out);
+  }
 
   CUSPARSE_CALL(cusparseDestroySpMat(matA));
   CUSPARSE_CALL(cusparseDestroyDnMat(matB));
@@ -320,8 +382,6 @@ inline bool cusparse_available() {
       return true;
   return false;
 #else
-  if (bits == 16)
-    return false;  // cusparse's SpMM on fp16 is slow, temporally disabled.
   return true;
 #endif
 }
