@@ -141,3 +141,4 @@ class Communicator(object):
         return self._size
 
 _init_api("dgl.cuda.nccl")
+
