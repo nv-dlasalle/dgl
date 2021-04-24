@@ -20,6 +20,8 @@ import dgl
 from dgl import DGLGraph
 from functools import partial
 
+from torch.cuda import nvtx
+
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
 from model import RelGraphEmbedLayer
 from dgl.nn import RelGraphConv
@@ -89,10 +91,11 @@ class EntityClassify(nn.Module):
 
         self.layers = nn.ModuleList()
         # i2h
-        self.layers.append(RelGraphConv(
-            self.h_dim, self.h_dim, self.num_rels, "basis",
-            self.num_bases, activation=F.relu, self_loop=self.use_self_loop,
-            low_mem=self.low_mem, dropout=self.dropout, layer_norm = layer_norm))
+        if num_hidden_layers >= 0:
+            self.layers.append(RelGraphConv(
+                self.h_dim, self.h_dim, self.num_rels, "basis",
+                self.num_bases, activation=F.relu, self_loop=self.use_self_loop,
+                low_mem=self.low_mem, dropout=self.dropout, layer_norm = layer_norm))
         # h2h
         for idx in range(self.num_hidden_layers):
             self.layers.append(RelGraphConv(
@@ -319,9 +322,6 @@ def run(proc_id, n_gpus, n_cpus, args, devices, dataset, split, queue=None):
 
     # training loop
     print("start training...")
-    forward_time = []
-    backward_time = []
-
     train_time = 0
     validation_time = 0
     test_time = 0
@@ -330,6 +330,9 @@ def run(proc_id, n_gpus, n_cpus, args, devices, dataset, split, queue=None):
     if n_gpus > 1 and n_cpus - args.num_workers > 0:
         th.set_num_threads(n_cpus-args.num_workers)
     for epoch in range(args.n_epochs):
+        forward_time = []
+        backward_time = []
+
         tstart = time.time()
         model.train()
         embed_layer.train()
@@ -337,21 +340,32 @@ def run(proc_id, n_gpus, n_cpus, args, devices, dataset, split, queue=None):
         for i, sample_data in enumerate(loader):
             seeds, blocks = sample_data
             t0 = time.time()
+            nvtx.range_push("embed_layer")
             feats = embed_layer(blocks[0].srcdata[dgl.NID],
                                 blocks[0].srcdata['ntype'],
                                 blocks[0].srcdata['type_id'],
                                 node_feats)
+            nvtx.range_pop()
+            nvtx.range_push("model")
             logits = model(blocks, feats)
+            nvtx.range_pop()
+            nvtx.range_push("loss")
             loss = F.cross_entropy(logits, labels[seeds])
+            nvtx.range_pop()
             t1 = time.time()
+            nvtx.range_push("zero_grad")
             optimizer.zero_grad()
             if emb_optimizer is not None:
                 emb_optimizer.zero_grad()
-
+            nvtx.range_pop()
+            nvtx.range_push("backward")
             loss.backward()
+            nvtx.range_pop()
+            nvtx.range_push("step")
             if emb_optimizer is not None:
                 emb_optimizer.step()
             optimizer.step()
+            nvtx.range_pop()
             t2 = time.time()
 
             forward_time.append(t1 - t0)
@@ -361,9 +375,9 @@ def run(proc_id, n_gpus, n_cpus, args, devices, dataset, split, queue=None):
                 print("Train Accuracy: {:.4f} | Train Loss: {:.4f}".
                     format(train_acc, loss.item()))
         gc.collect()
-        print("Epoch {:05d}:{:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f}".
-            format(epoch, args.n_epochs, forward_time[-1], backward_time[-1]))
         tend = time.time()
+        print("Epoch {:05d}:{:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f} | Total Time {:.4f}".
+            format(epoch, args.n_epochs, sum(forward_time), sum(backward_time), tend-tstart))
         train_time += (tend - tstart)
 
         def collect_eval():
