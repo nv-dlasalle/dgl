@@ -337,7 +337,12 @@ def run(proc_id, n_gpus, n_cpus, args, devices, dataset, split, queue=None):
         model.train()
         embed_layer.train()
 
+        nvtx.range_push("dataloader")
         for i, sample_data in enumerate(loader):
+            if n_gpus > 1:
+                th.distributed.barrier()
+            nvtx.range_pop()
+            
             seeds, blocks = sample_data
             t0 = time.time()
             nvtx.range_push("embed_layer")
@@ -372,10 +377,12 @@ def run(proc_id, n_gpus, n_cpus, args, devices, dataset, split, queue=None):
             backward_time.append(t2 - t1)
             train_acc = th.sum(logits.argmax(dim=1) == labels[seeds]).item() / len(seeds)
             if i % 100 == 0 and proc_id == 0:
-                print("Train Accuracy: {:.4f} | Train Loss: {:.4f}".
-                    format(train_acc, loss.item()))
-        gc.collect()
+                print("Step {:05d} | Train Accuracy: {:.4f} | Train Loss: {:.4f}".
+                    format(i, train_acc, loss.item()))
+            nvtx.range_push("dataloader")
+        nvtx.range_pop()
         tend = time.time()
+        gc.collect()
         print("Epoch {:05d}:{:05d} | Train Forward Time(s) {:.4f} | Backward Time(s) {:.4f} | Total Time {:.4f}".
             format(epoch, args.n_epochs, sum(forward_time), sum(backward_time), tend-tstart))
         train_time += (tend - tstart)
@@ -447,7 +454,7 @@ def run(proc_id, n_gpus, n_cpus, args, devices, dataset, split, queue=None):
                                                   np.mean(forward_time[len(forward_time) // 4:])))
     print("{}/{} Mean backward time: {:4f}".format(proc_id, n_gpus,
                                                    np.mean(backward_time[len(backward_time) // 4:])))
-    if proc_id == 0:
+    if proc_id == 0 and do_test:
         print("Final Test Accuracy: {:.4f} | Test loss: {:.4f}".format(test_acc, test_loss))
         print("Train {}s, valid {}s, test {}s".format(train_time, validation_time, test_time))
 
