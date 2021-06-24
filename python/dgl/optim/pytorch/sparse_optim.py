@@ -60,6 +60,8 @@ class SparseGradOptimizer(abc.ABC):
         if self._first_step:
             for emb in self._params:
                 for _, data in emb._trace:
+                    if data.grad is None:
+                        continue
                     if data.grad.data.device.type == 'cuda':
                         # create a communicator
                         if self._device:
@@ -167,11 +169,14 @@ class SparseGradOptimizer(abc.ABC):
                     # the special case where we can use the tensors as is
                     # without any memcpy's
                     idx, grad = emb._trace[0]
-                    grad = grad.grad.data
+                    if grad.grad is not None:
+                        grad = grad.grad.data
                 else:
                     idx = []
                     grad = []
                     for i, data in emb._trace:
+                        if data.grad is None:
+                            continue
                         idx.append(i)
                         grad.append(data.grad.data)
                     idx = th.cat(idx, dim=0)
@@ -212,6 +217,8 @@ class SparseGradOptimizer(abc.ABC):
                 idx = []
                 grad = []
                 for i, data in emb._trace:
+                    if data.grad is None:
+                        continue
                     idx.append(i)
                     grad.append(data.grad.data)
                 # If the sparse embedding is not used in the previous forward step
